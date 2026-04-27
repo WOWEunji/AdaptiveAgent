@@ -14,6 +14,10 @@ class Tool:
     description: str
     keywords: tuple[str, ...]
     handler: Callable[[dict[str, Any]], "ToolExecutionResult"]
+    category: str = "function"
+    requires_llm: bool = False
+    safety_level: str = "low"
+    usage: str = ""
 
 
 @dataclass(frozen=True)

@@ -48,6 +48,23 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertIsNone(result.tool_name)
         self.assertIn("새로운 툴을 설계해줘", llm.prompts[0])
 
+    def test_requirements_analysis_tool_returns_breakdown(self) -> None:
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM())
+
+        result = agent.run("요구사항 분해 보여줘")
+
+        self.assertEqual(result.tool_name, "analyze_requirements")
+        self.assertIn('"id": "R1"', result.output)
+        self.assertIn("SkillX", result.output)
+
+    def test_list_tools_includes_builtin_tools(self) -> None:
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM())
+
+        tool_names = {tool.name for tool in agent.list_tools()}
+
+        self.assertIn("echo", tool_names)
+        self.assertIn("list_files", tool_names)
+
 
 if __name__ == "__main__":
     unittest.main()

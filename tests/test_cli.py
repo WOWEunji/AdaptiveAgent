@@ -18,6 +18,23 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn('"tool_name": "echo"', buffer.getvalue())
+        self.assertIn('"action": "tool"', buffer.getvalue())
+
+    def test_list_tools_output(self) -> None:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            exit_code = main(["--list-tools"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("analyze_requirements", buffer.getvalue())
+
+    def test_list_tools_json_output(self) -> None:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            exit_code = main(["--list-tools", "--json"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn('"name": "list_files"', buffer.getvalue())
 
 
 if __name__ == "__main__":

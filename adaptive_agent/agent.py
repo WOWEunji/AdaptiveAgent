@@ -18,6 +18,7 @@ class AgentResponse:
     task: str
     output: str
     tool_name: str | None = None
+    action: str = "respond"
 
 
 class AdaptiveAgent:
@@ -32,14 +33,19 @@ class AdaptiveAgent:
     ) -> None:
         self.config = config or AgentConfig.from_env()
         self.llm_client = llm_client or create_llm_client(self.config)
-        self.registry = registry or create_default_registry()
+        self.registry = registry or create_default_registry(self.config.workspace_dir)
         self.executor = executor or ToolExecutor(self.registry)
+
+    def list_tools(self) -> list:
+        """현재 등록된 툴 목록을 반환합니다."""
+
+        return self.registry.list()
 
     def run(self, task: str) -> AgentResponse:
         """작업을 수행하고 사용자에게 보여줄 응답을 반환합니다."""
         normalized_task = task.strip()
         if not normalized_task:
-            return AgentResponse(task=task, output="작업 내용을 입력해 주세요.")
+            return AgentResponse(task=task, output="작업 내용을 입력해 주세요.", action="input_required")
 
         selected_tool = self.registry.match(normalized_task)
         if selected_tool is not None:
@@ -49,15 +55,17 @@ class AdaptiveAgent:
                     task=normalized_task,
                     output=str(result.output),
                     tool_name=selected_tool.name,
+                    action="tool",
                 )
             return AgentResponse(
                 task=normalized_task,
                 output=f"툴 실행 실패: {result.error}",
                 tool_name=selected_tool.name,
+                action="tool_error",
             )
 
         response = self.llm_client.complete(self._build_prompt(normalized_task))
-        return AgentResponse(task=normalized_task, output=response)
+        return AgentResponse(task=normalized_task, output=response, action="llm")
 
     def _build_prompt(self, task: str) -> str:
         """LLM에 전달할 기본 지시문을 구성합니다."""
