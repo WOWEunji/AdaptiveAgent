@@ -6,7 +6,13 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - dependency가 설치되면 실제 구현을 사용합니다.
+    def load_dotenv(*_args: object, **_kwargs: object) -> bool:
+        """python-dotenv 미설치 환경에서 설정 로드를 건너뜁니다."""
+
+        return False
 
 
 @dataclass(frozen=True)
