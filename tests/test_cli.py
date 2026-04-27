@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from adaptive_agent.cli import main
@@ -53,11 +53,13 @@ class CliTest(unittest.TestCase):
         self.assertIn('"task": "  원문  유지  "', buffer.getvalue())
 
     def test_natural_language_requires_single_argument(self) -> None:
-        with self.assertRaises(SystemExit):
+        error_buffer = io.StringIO()
+        with redirect_stderr(error_buffer), self.assertRaises(SystemExit):
             main(["분리된", "입력"])
 
     def test_multiple_task_arguments_are_rejected_to_preserve_input(self) -> None:
-        with self.assertRaises(SystemExit):
+        error_buffer = io.StringIO()
+        with redirect_stderr(error_buffer), self.assertRaises(SystemExit):
             main(["원문", "분리"])
 
 
