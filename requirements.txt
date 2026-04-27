@@ -1,2 +1,4 @@
 ollama
+openai>=1.40.0
+google-generativeai>=0.8.0
 python-dotenv

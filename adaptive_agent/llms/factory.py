@@ -12,5 +12,13 @@ def create_llm_client(config: AgentConfig, provider: str | None = None) -> LLMCl
     selected_provider = (provider or config.llm_provider).lower()
     if selected_provider == "ollama":
         return OllamaClient(model=config.ollama_model)
+    if selected_provider == "openai":
+        from adaptive_agent.llms.openai_client import OpenAIClient
+
+        return OpenAIClient(model=config.openai_model)
+    if selected_provider in ("gemini", "google"):
+        from adaptive_agent.llms.gemini_client import GeminiClient
+
+        return GeminiClient(model=config.gemini_model)
 
     raise ValueError(f"Unsupported LLM provider: {selected_provider}")

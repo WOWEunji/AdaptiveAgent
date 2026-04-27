@@ -22,7 +22,8 @@ class AgentConfig:
     llm_provider: str = "ollama"
     ollama_model: str = "qwen2.5:1.5b"
     ollama_host: str | None = None
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-5-nano"
+    gemini_model: str = "gemini-2.5-flash-lite"
     anthropic_model: str = "claude-3-5-haiku-latest"
     grok_model: str = "grok-beta"
     language: str = "ko"
@@ -56,7 +57,8 @@ class AgentConfig:
             or os.getenv("ADAPTIVE_AGENT_LLM", os.getenv("LLM_PROVIDER", "ollama")),
             ollama_model=os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b"),
             ollama_host=os.getenv("OLLAMA_HOST") or None,
-            openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            openai_model=os.getenv("OPENAI_MODEL", "gpt-5-nano"),
+            gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
             anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
             grok_model=os.getenv("GROK_MODEL", "grok-beta"),
             language=language or os.getenv("ADAPTIVE_AGENT_LANGUAGE", "ko"),
