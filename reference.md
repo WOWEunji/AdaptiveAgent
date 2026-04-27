@@ -1,5 +1,7 @@
 # AdaptiveAgent References
 
+논문·기술 자료의 **상세 메모·적용 아이디어**는 [`docs/research/`](docs/research/README.md)에 두고, 이 파일은 **읽을 목록·한 줄 요약** 위주로 유지하는 것을 권장한다.
+
 ## 툴 생성 및 스킬 라이브러리 관련 주요 논문
 
 ### 1. SkillX: Automatically Constructing Skill Knowledge Bases for Agents (2026년 4월)
