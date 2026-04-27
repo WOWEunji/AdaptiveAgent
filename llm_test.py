@@ -20,7 +20,8 @@
     구현 참고: gpt-5* 는 Chat Completions 대신 Responses API 경로를 탄다 (`openai_client.py`).
     기타: gpt-3.5-turbo 등은 OPENAI_MODEL 로 지정 (OpenAI 요금표 확인)
 
-  Gemini (저렴한 쪽 우선; 2026년 기준 2.0 Flash 계열 단종 일정 있음 → 2.5 Flash-Lite 권장)
+  Gemini — `google-genai` SDK, AI Studio API 키만 있으면 됨(GCP Project ID 불필요).
+    (저렴한 쪽 우선; 2.0 Flash 계열 단종 일정 있음 → 2.5 Flash-Lite 권장)
     - gemini-2.5-flash-lite   ← 기본값 (GA, Flash-Lite)
     - gemini-2.0-flash-lite
     - gemini-2.0-flash
