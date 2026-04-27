@@ -1,4 +1,4 @@
-"""Google Gemini (Generative Language API) client."""
+"""Google Gemini client (Google GenAI SDK — AI Studio API 키)."""
 
 from __future__ import annotations
 
@@ -35,25 +35,38 @@ def validate_gemini_api_key(key: str | None) -> str:
 
 
 class GeminiClient:
-    """`google-generativeai` 기반 최소 클라이언트."""
+    """`google-genai` — Gemini Developer API(API 키). GCP Project ID 불필요."""
 
     def __init__(self, model: str, *, api_key: str | None = None) -> None:
         self._model = model
         self._api_key = validate_gemini_api_key(_resolve_api_key(api_key))
 
     def generate(self, prompt: str) -> str:
-        import google.generativeai as genai
+        from google import genai
 
-        genai.configure(api_key=self._api_key)
-        gm = genai.GenerativeModel(self._model)
-        response = gm.generate_content(prompt)
+        client = genai.Client(api_key=self._api_key)
+        try:
+            response = client.models.generate_content(
+                model=self._model,
+                contents=prompt,
+            )
+        except Exception as e:
+            msg = (
+                "Gemini API 호출에 실패했습니다. "
+                "키는 AI Studio 발급인지, 모델 ID·과금·할당량을 확인하세요. "
+                f"원본: {e}"
+            )
+            raise ValueError(msg) from e
+
         text = getattr(response, "text", None)
         if text:
-            return text
-        if response.candidates:
-            parts = response.candidates[0].content.parts
-            return "".join(getattr(p, "text", "") for p in parts)
-        return ""
+            return text.strip()
+        msg = (
+            "Gemini가 빈 텍스트를 반환했습니다. "
+            "안전 필터 차단·모델 미지원(모델명 오타)·429 등일 수 있습니다. "
+            "`GEMINI_MODEL`을 gemini-2.5-flash-lite 등으로 바꿔 보세요."
+        )
+        raise ValueError(msg)
 
 
 def create_gemini_client(model: str, *, api_key: str | None = None) -> LLMClient:
