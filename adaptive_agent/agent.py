@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from adaptive_agent.config import AgentConfig
 from adaptive_agent.llms.base import LLMClient
@@ -16,7 +17,7 @@ class AgentResponse:
     """Agent 실행 결과."""
 
     task: str
-    output: str
+    output: Any
     tool_name: str | None = None
     action: str = "respond"
 
@@ -53,7 +54,7 @@ class AdaptiveAgent:
             if result.success:
                 return AgentResponse(
                     task=normalized_task,
-                    output=str(result.output),
+                    output=result.output,
                     tool_name=selected_tool.name,
                     action="tool",
                 )

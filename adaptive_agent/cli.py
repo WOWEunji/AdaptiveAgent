@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import replace
+from pprint import pformat
 from typing import Sequence
 
 from adaptive_agent.agent import AdaptiveAgent
@@ -94,7 +95,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
     else:
-        print(result.output)
+        if isinstance(result.output, (dict, list)):
+            print(pformat(result.output, width=100, sort_dicts=False))
+        else:
+            print(result.output)
     return 0
 
 

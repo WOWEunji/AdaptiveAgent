@@ -55,76 +55,7 @@ def create_default_registry(workspace_dir: Path | None = None) -> ToolRegistry:
     def analyze_requirements(_arguments: dict[str, object]) -> ToolExecutionResult:
         """reference.md 방법론을 구현 과제로 분해한 결과를 반환합니다."""
 
-        result = {
-            "goal": "CLI 기반 AdaptiveAgent가 자연어 작업을 분석하고 필요한 툴을 생성/검증/재사용한다.",
-            "requirements": [
-                {
-                    "id": "R1",
-                    "name": "작업 분석 및 계획",
-                    "details": [
-                        "사용자 입력을 정규화하고 의도를 분류한다.",
-                        "즉시 실행 가능한 내장 툴, 기존 스킬, 새 툴 생성 필요 여부를 결정한다.",
-                        "모호하면 human-in-the-loop 질문을 반환한다.",
-                    ],
-                    "reference": "ToolLibGen, SkillX",
-                },
-                {
-                    "id": "R2",
-                    "name": "툴 인터페이스 표준화",
-                    "details": [
-                        "모든 툴은 이름, 설명, 키워드, 입력 스키마, 실행 핸들러, 안전 등급을 가진다.",
-                        "입출력은 JSON 직렬화 가능한 구조를 기본으로 한다.",
-                    ],
-                    "reference": "MCP specification",
-                },
-                {
-                    "id": "R3",
-                    "name": "동적 툴 생성",
-                    "details": [
-                        "반복되는 결정론적 작업을 파이썬 함수로 생성한다.",
-                        "생성 전 기존 툴과 중복 여부를 확인한다.",
-                        "생성된 툴은 독립 프로세스 또는 샌드박스에서 검증한다.",
-                    ],
-                    "reference": "ToolMaker, ToolLibGen",
-                },
-                {
-                    "id": "R4",
-                    "name": "툴 검증 및 self-correction",
-                    "details": [
-                        "생성 툴은 단위 테스트, 실행 성공률, 안전성, 재사용성을 확인한다.",
-                        "오류 발생 시 제한된 횟수만 수정 루프를 돌고 실패 원인을 분류한다.",
-                    ],
-                    "reference": "EvolveTool-Bench, Probabilistic self-correction",
-                },
-                {
-                    "id": "R5",
-                    "name": "스킬 라이브러리 관리",
-                    "details": [
-                        "툴을 계획 스킬, 기능 스킬, 원자 스킬로 분류해 저장한다.",
-                        "중복 제거, 버전 관리, 검색 성능 저하 방지를 위한 병합 정책을 둔다.",
-                    ],
-                    "reference": "SkillX, AgentEvolver",
-                },
-                {
-                    "id": "R6",
-                    "name": "CLI 실행 검증",
-                    "details": [
-                        "Codespace에서 의존성 설치 후 `python3 -m adaptive_agent`로 실행 가능해야 한다.",
-                        "LLM 없이도 요구사항 분석, 툴 목록, echo가 검증 가능해야 한다.",
-                        "Ollama 연결 시 자연어 fallback 응답을 검증한다.",
-                    ],
-                    "reference": "Project operation requirement",
-                },
-            ],
-            "milestones": [
-                "M1: CLI/설정/내장 툴/요구사항 분석 출력",
-                "M2: LLM 기반 계획기와 툴 선택기",
-                "M3: 생성 툴 저장소와 검증 파이프라인",
-                "M4: self-correction 및 실패 귀인",
-                "M5: 스킬 라이브러리 최적화와 MCP 호환 인터페이스",
-            ],
-        }
-        return ToolExecutionResult(success=True, output=json.dumps(result, ensure_ascii=False, indent=2))
+        return ToolExecutionResult(success=True, output=_requirements_breakdown())
 
     def list_tools(_arguments: dict[str, object]) -> ToolExecutionResult:
         tools = [
@@ -198,3 +129,77 @@ def create_default_registry(workspace_dir: Path | None = None) -> ToolRegistry:
         )
     )
     return registry
+
+
+def _requirements_breakdown() -> dict[str, object]:
+    """reference.md 기반 요구사항 분해 결과를 구조화된 데이터로 제공합니다."""
+
+    return {
+        "goal": "CLI 기반 AdaptiveAgent가 자연어 작업을 분석하고 필요한 툴을 생성/검증/재사용한다.",
+        "requirements": [
+            {
+                "id": "R1",
+                "name": "작업 분석 및 계획",
+                "details": [
+                    "사용자 입력을 정규화하고 의도를 분류한다.",
+                    "즉시 실행 가능한 내장 툴, 기존 스킬, 새 툴 생성 필요 여부를 결정한다.",
+                    "모호하면 human-in-the-loop 질문을 반환한다.",
+                ],
+                "reference": "ToolLibGen, SkillX",
+            },
+            {
+                "id": "R2",
+                "name": "툴 인터페이스 표준화",
+                "details": [
+                    "모든 툴은 이름, 설명, 키워드, 입력 스키마, 실행 핸들러, 안전 등급을 가진다.",
+                    "입출력은 JSON 직렬화 가능한 구조를 기본으로 한다.",
+                ],
+                "reference": "MCP specification",
+            },
+            {
+                "id": "R3",
+                "name": "동적 툴 생성",
+                "details": [
+                    "반복되는 결정론적 작업을 파이썬 함수로 생성한다.",
+                    "생성 전 기존 툴과 중복 여부를 확인한다.",
+                    "생성된 툴은 독립 프로세스 또는 샌드박스에서 검증한다.",
+                ],
+                "reference": "ToolMaker, ToolLibGen",
+            },
+            {
+                "id": "R4",
+                "name": "툴 검증 및 self-correction",
+                "details": [
+                    "생성 툴은 단위 테스트, 실행 성공률, 안전성, 재사용성을 확인한다.",
+                    "오류 발생 시 제한된 횟수만 수정 루프를 돌고 실패 원인을 분류한다.",
+                ],
+                "reference": "EvolveTool-Bench, Probabilistic self-correction",
+            },
+            {
+                "id": "R5",
+                "name": "스킬 라이브러리 관리",
+                "details": [
+                    "툴을 계획 스킬, 기능 스킬, 원자 스킬로 분류해 저장한다.",
+                    "중복 제거, 버전 관리, 검색 성능 저하 방지를 위한 병합 정책을 둔다.",
+                ],
+                "reference": "SkillX, AgentEvolver",
+            },
+            {
+                "id": "R6",
+                "name": "CLI 실행 검증",
+                "details": [
+                    "Codespace에서 의존성 설치 후 `python3 -m adaptive_agent`로 실행 가능해야 한다.",
+                    "LLM 없이도 요구사항 분석, 툴 목록, echo가 검증 가능해야 한다.",
+                    "Ollama 연결 시 자연어 fallback 응답을 검증한다.",
+                ],
+                "reference": "Project operation requirement",
+            },
+        ],
+        "milestones": [
+            "M1: CLI/설정/내장 툴/요구사항 분석 출력",
+            "M2: LLM 기반 계획기와 툴 선택기",
+            "M3: 생성 툴 저장소와 검증 파이프라인",
+            "M4: self-correction 및 실패 귀인",
+            "M5: 스킬 라이브러리 최적화와 MCP 호환 인터페이스",
+        ],
+    }

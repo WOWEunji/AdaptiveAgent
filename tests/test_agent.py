@@ -54,8 +54,8 @@ class AdaptiveAgentTest(unittest.TestCase):
         result = agent.run("요구사항 분해 보여줘")
 
         self.assertEqual(result.tool_name, "analyze_requirements")
-        self.assertIn('"id": "R1"', result.output)
-        self.assertIn("SkillX", result.output)
+        self.assertEqual(result.output["requirements"][0]["id"], "R1")
+        self.assertIn("SkillX", result.output["requirements"][0]["reference"])
 
     def test_list_tools_includes_builtin_tools(self) -> None:
         agent = AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM())

@@ -89,6 +89,25 @@ python3 -m adaptive_agent "동적 툴 생성 아키텍처를 요약해줘"
 
 ```bash
 python3 -m unittest discover
+python3 -m compileall adaptive_agent tests
+```
+
+## Codespace CLI 검증 체크리스트
+
+LLM 없이 검증:
+
+```bash
+python3 -m adaptive_agent --list-tools
+python3 -m adaptive_agent --json "echo hello"
+python3 -m adaptive_agent --json "파일 목록 보여줘"
+python3 -m adaptive_agent "요구사항 분해 보여줘"
+```
+
+Ollama 설치 후 LLM fallback 검증:
+
+```bash
+ollama pull qwen2.5:1.5b
+python3 -m adaptive_agent "AdaptiveAgent의 다음 구현 단계를 요약해줘"
 ```
 
 ## 설계 방향
