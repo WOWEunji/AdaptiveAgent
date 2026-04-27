@@ -1,0 +1,5 @@
+ollama
+openai
+anthropic
+python-dotenv
+requests
