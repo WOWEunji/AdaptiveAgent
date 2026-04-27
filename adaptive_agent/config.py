@@ -42,7 +42,8 @@ class AgentConfig:
         """환경 변수와 .env 파일에서 설정을 로드합니다."""
 
         if env_file:
-            load_dotenv(env_file)
+            # 기본값은 환경 변수가 이미 있으면 .env를 무시한다. 로컬 `.env`가 의도한 설정이 되도록 덮어쓴다.
+            load_dotenv(env_file, override=True)
 
         workspace_dir = Path(os.getenv("ADAPTIVE_AGENT_WORKSPACE", Path.cwd())).resolve()
         tool_library_dir = Path(
