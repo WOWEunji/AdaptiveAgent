@@ -1,15 +1,14 @@
-"""Tool registry and built-in keyword-matched tools."""
+"""Tool registry and built-in tools."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from adaptive_agent.tools.models import Tool, ToolExecutionResult
 
 
 class ToolRegistry:
-    """실행 가능한 툴을 등록하고 간단한 키워드로 매칭합니다."""
+    """실행 가능한 툴을 등록하고 이름으로 조회합니다."""
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
@@ -21,13 +20,6 @@ class ToolRegistry:
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
-
-    def match(self, task: str) -> Tool | None:
-        normalized = task.lower()
-        for tool in self._tools.values():
-            if any(keyword.lower() in normalized for keyword in tool.keywords):
-                return tool
-        return None
 
     def list(self) -> list[Tool]:
         return list(self._tools.values())
@@ -42,16 +34,6 @@ def create_default_registry(workspace_dir: Path | None = None) -> ToolRegistry:
     def echo(arguments: dict[str, object]) -> ToolExecutionResult:
         return ToolExecutionResult(success=True, output=arguments.get("task", ""))
 
-    def extract_path(task: str) -> str:
-        """간단한 CLI 검증용으로 작업 문자열에서 경로를 추출합니다."""
-
-        parts = task.split()
-        for marker in ("path=", "경로="):
-            for part in parts:
-                if part.startswith(marker):
-                    return part[len(marker) :]
-        return "."
-
     def analyze_requirements(_arguments: dict[str, object]) -> ToolExecutionResult:
         """reference.md 방법론을 구현 과제로 분해한 결과를 반환합니다."""
 
@@ -62,17 +44,16 @@ def create_default_registry(workspace_dir: Path | None = None) -> ToolRegistry:
             {
                 "name": tool.name,
                 "description": tool.description,
-                "keywords": list(tool.keywords),
                 "category": tool.category,
                 "safety_level": tool.safety_level,
                 "usage": tool.usage,
             }
             for tool in registry.list()
         ]
-        return ToolExecutionResult(success=True, output=json.dumps(tools, ensure_ascii=False, indent=2))
+        return ToolExecutionResult(success=True, output=tools)
 
     def list_files(arguments: dict[str, object]) -> ToolExecutionResult:
-        raw_path = extract_path(str(arguments.get("task") or ""))
+        raw_path = str(arguments.get("path") or ".")
         candidate = (workspace / raw_path).resolve()
         if candidate != workspace and workspace not in candidate.parents:
             return ToolExecutionResult(success=False, output="", error="Workspace 밖의 경로는 조회할 수 없습니다.")
@@ -92,27 +73,24 @@ def create_default_registry(workspace_dir: Path | None = None) -> ToolRegistry:
         Tool(
             name="echo",
             description="입력 작업을 그대로 반환하는 상태 확인용 툴입니다.",
-            keywords=("echo", "반복", "그대로", "ping"),
             handler=echo,
             category="atomic",
-            usage='python3 -m adaptive_agent --json "echo hello"',
+            usage='python3 -m adaptive_agent --tool echo --arg task="echo hello"',
         )
     )
     registry.register(
         Tool(
             name="analyze_requirements",
             description="reference.md 방법론을 기반으로 프로젝트 요구사항을 분해합니다.",
-            keywords=("요구사항", "요구 사항", "분석", "분해", "방법론", "아키텍처"),
             handler=analyze_requirements,
             category="planning",
-            usage='python3 -m adaptive_agent "요구사항 분해 보여줘"',
+            usage="python3 -m adaptive_agent --tool analyze_requirements",
         )
     )
     registry.register(
         Tool(
             name="list_tools",
             description="등록된 내장 툴 목록을 출력합니다.",
-            keywords=("툴 목록", "도구 목록", "list tools", "tools"),
             handler=list_tools,
             category="utility",
             usage="python3 -m adaptive_agent --list-tools",
@@ -122,10 +100,9 @@ def create_default_registry(workspace_dir: Path | None = None) -> ToolRegistry:
         Tool(
             name="list_files",
             description="작업공간 파일 목록을 안전하게 조회합니다.",
-            keywords=("파일 목록", "ls", "list files", "디렉터리"),
             handler=list_files,
             category="utility",
-            usage='python3 -m adaptive_agent --json "파일 목록 path=adaptive_agent"',
+            usage="python3 -m adaptive_agent --tool list_files --arg path=adaptive_agent",
         )
     )
     return registry
@@ -141,8 +118,8 @@ def _requirements_breakdown() -> dict[str, object]:
                 "id": "R1",
                 "name": "작업 분석 및 계획",
                 "details": [
-                    "사용자 입력을 정규화하고 의도를 분류한다.",
-                    "즉시 실행 가능한 내장 툴, 기존 스킬, 새 툴 생성 필요 여부를 결정한다.",
+                    "사용자 입력 원문을 보존한 채 LLM이 의도를 분류한다.",
+                    "LLM 계획을 통해 즉시 실행 가능한 내장 툴, 기존 스킬, 새 툴 생성 필요 여부를 결정한다.",
                     "모호하면 human-in-the-loop 질문을 반환한다.",
                 ],
                 "reference": "ToolLibGen, SkillX",
@@ -151,7 +128,7 @@ def _requirements_breakdown() -> dict[str, object]:
                 "id": "R2",
                 "name": "툴 인터페이스 표준화",
                 "details": [
-                    "모든 툴은 이름, 설명, 키워드, 입력 스키마, 실행 핸들러, 안전 등급을 가진다.",
+                    "모든 툴은 이름, 설명, 입력 스키마, 실행 핸들러, 안전 등급을 가진다.",
                     "입출력은 JSON 직렬화 가능한 구조를 기본으로 한다.",
                 ],
                 "reference": "MCP specification",
@@ -189,8 +166,8 @@ def _requirements_breakdown() -> dict[str, object]:
                 "name": "CLI 실행 검증",
                 "details": [
                     "Codespace에서 의존성 설치 후 `python3 -m adaptive_agent`로 실행 가능해야 한다.",
-                    "LLM 없이도 요구사항 분석, 툴 목록, echo가 검증 가능해야 한다.",
-                    "Ollama 연결 시 자연어 fallback 응답을 검증한다.",
+                    "명시적 `--tool` 호출로 요구사항 분석, 툴 목록, echo가 검증 가능해야 한다.",
+                    "Ollama 연결 시 자연어 입력에 대한 LLM 계획/응답을 검증한다.",
                 ],
                 "reference": "Project operation requirement",
             },

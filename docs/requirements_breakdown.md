@@ -6,8 +6,8 @@
 
 AdaptiveAgent는 사용자의 자연어 작업을 받아 다음 순서로 처리하는 CLI 기반 에이전트입니다.
 
-1. 작업 의도를 분석한다.
-2. 이미 등록된 툴로 처리 가능한지 확인한다.
+1. 사용자 입력 원문을 보존한 채 LLM이 작업 의도를 분석한다.
+2. LLM이 이미 등록된 툴로 처리 가능한지 판단한다.
 3. 필요한 경우 LLM에게 계획 또는 응답 생성을 요청한다.
 4. 향후에는 반복 작업을 재사용 가능한 툴로 생성하고 검증한 뒤 라이브러리에 저장한다.
 
@@ -16,15 +16,15 @@ AdaptiveAgent는 사용자의 자연어 작업을 받아 다음 순서로 처리
 ### 2.1 Codespace에서 빠른 기능 검증
 
 - 사용자는 저장소에 접속한 뒤 `python3 -m adaptive_agent ...` 명령으로 CLI가 동작하는지 확인한다.
-- Ollama나 외부 API 키가 없어도 기본 내장 툴은 동작해야 한다.
+- Ollama나 외부 API 키가 없어도 `--tool`로 명시 호출한 내장 툴은 동작해야 한다.
 - JSON 출력으로 자동 검증할 수 있어야 한다.
 
 검증 예:
 
 ```bash
 python3 -m adaptive_agent --list-tools
-python3 -m adaptive_agent --json "echo hello"
-python3 -m adaptive_agent --json "파일 목록 보여줘"
+python3 -m adaptive_agent --tool echo --arg task="echo hello" --json
+python3 -m adaptive_agent --tool list_files --arg path=. --json
 ```
 
 ### 2.2 LLM 연결 검증
@@ -41,7 +41,7 @@ python3 -m adaptive_agent "동적 툴 생성 계획을 요약해줘"
 ### 2.3 동적 툴 생성 준비
 
 - 현재 단계에서는 실제 코드 생성보다 안전한 실행 계약을 먼저 둔다.
-- 생성 툴은 이름, 설명, 키워드, 입력 스키마, 실행 결과, 검증 상태를 가져야 한다.
+- 생성 툴은 이름, 설명, 입력 스키마, 실행 결과, 검증 상태를 가져야 한다.
 - 생성된 툴은 중복/안전성 검사를 통과한 뒤 저장소에 보관한다.
 
 ## 3. 기능 분해
@@ -50,7 +50,7 @@ python3 -m adaptive_agent "동적 툴 생성 계획을 요약해줘"
 
 책임:
 
-- 사용자 입력 파싱
+- 자연어 task는 따옴표로 감싼 단일 CLI 인자로 받아 원문 보존
 - 언어 및 provider 옵션 반영
 - 등록 툴 목록 출력
 - 일반 텍스트 또는 JSON 결과 출력
@@ -62,6 +62,8 @@ python3 -m adaptive_agent "동적 툴 생성 계획을 요약해줘"
 - `--language`
 - `--llm`
 - `--list-tools`
+- `--tool`
+- `--arg`
 
 다음 확장:
 
@@ -74,15 +76,16 @@ python3 -m adaptive_agent "동적 툴 생성 계획을 요약해줘"
 책임:
 
 - 빈 입력 처리
-- 작업 분석 결과 기록
-- 툴 매칭
+- LLM 계획 결과 기록
+- LLM 계획에 따른 툴 실행
 - 툴 실행
 - LLM fallback
 
 현재 구현:
 
-- 키워드 기반 내장 툴 매칭
-- 실행 결과에 `mode`, `tool_name`, `error` 포함
+- 자연어 입력은 LLM JSON 계획으로만 처리
+- rule matching 및 사용자 입력 정규화 금지
+- 실행 결과에 `action`, `tool_name`, `output` 포함
 
 다음 확장:
 
@@ -194,8 +197,8 @@ python3 -m adaptive_agent "동적 툴 생성 계획을 요약해줘"
 python3 -m unittest discover
 python3 -m compileall adaptive_agent tests
 python3 -m adaptive_agent --list-tools
-python3 -m adaptive_agent --json "echo hello"
-python3 -m adaptive_agent --json "파일 목록 보여줘"
+python3 -m adaptive_agent --tool echo --arg task="echo hello" --json
+python3 -m adaptive_agent --tool list_files --arg path=. --json
 ```
 
 Ollama 검증:
