@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -38,12 +40,13 @@ class LLMFactoryTest(unittest.TestCase):
     def test_ollama_client_uses_configured_host(self) -> None:
         ollama_client = Mock()
         ollama_client.chat.return_value = {"message": {"content": "ok"}}
+        ollama_module = SimpleNamespace(Client=Mock(return_value=ollama_client))
 
-        with patch("ollama.Client", return_value=ollama_client) as client_class:
+        with patch.dict(sys.modules, {"ollama": ollama_module}):
             result = OllamaClient(model="qwen-test", host="http://ollama.test:11434").complete("hello")
 
         self.assertEqual(result, "ok")
-        client_class.assert_called_once_with(host="http://ollama.test:11434")
+        ollama_module.Client.assert_called_once_with(host="http://ollama.test:11434")
         ollama_client.chat.assert_called_once_with(
             model="qwen-test",
             messages=[{"role": "user", "content": "hello"}],
