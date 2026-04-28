@@ -120,7 +120,7 @@ python3 -m adaptive_agent --json --tool list_files --arg path=adaptive_agent
 python3 -m adaptive_agent --tool analyze_requirements
 ```
 
-필요하면 GitHub Actions에서 `Run workflow`로 수동 실행할 수 있다. `task`, `tool`, `tool_args` 입력을 바꿔 PR 브랜치의 CLI 결과를 원격 로그에서 확인할 수 있다.
+필요하면 GitHub Actions에서 `Run workflow`로 수동 실행할 수 있다. `task`, `tool`, `tool_arg` 입력을 바꿔 PR 브랜치의 CLI 결과를 원격 로그에서 확인할 수 있다.
 
 ## Codespace CLI 검증 체크리스트
 
