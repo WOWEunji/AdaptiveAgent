@@ -1,0 +1,130 @@
+name: Manual LLM Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      llm_provider:
+        description: "LLM provider: openai, gemini, or ollama"
+        required: true
+        default: "openai"
+        type: choice
+        options:
+          - openai
+          - gemini
+          - ollama
+      llm_model:
+        description: "Model name. Recommended OpenAI default: gpt-5-nano"
+        required: false
+        default: "gpt-5-nano"
+      task:
+        description: "Natural language task to send to the selected LLM"
+        required: false
+        default: "연결 테스트입니다. 최종 응답으로 CONNECTION_OK 라고만 답해줘."
+
+jobs:
+  manual-llm-check:
+    name: Manual LLM connection check
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure selected provider
+        env:
+          INPUT_LLM_PROVIDER: ${{ inputs.llm_provider }}
+          INPUT_LLM_MODEL: ${{ inputs.llm_model }}
+        run: |
+          provider="$INPUT_LLM_PROVIDER"
+          model="$INPUT_LLM_MODEL"
+          {
+            echo "ADAPTIVE_AGENT_LLM=$provider"
+            if [ "$provider" = "openai" ]; then
+              echo "OPENAI_MODEL=${model:-gpt-5-nano}"
+            fi
+            if [ "$provider" = "gemini" ]; then
+              echo "GEMINI_MODEL=${model:-gemini-2.5-flash-lite}"
+            fi
+            if [ "$provider" = "ollama" ]; then
+              echo "OLLAMA_MODEL=${model:-qwen2.5:1.5b}"
+            fi
+          } >> "$GITHUB_ENV"
+
+      - name: Start Ollama when selected
+        if: ${{ inputs.llm_provider == 'ollama' }}
+        env:
+          INPUT_LLM_MODEL: ${{ inputs.llm_model }}
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve > ollama.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          model="$INPUT_LLM_MODEL"
+          if [ -z "$model" ]; then
+            model="qwen2.5:1.5b"
+          fi
+          ollama pull "$model"
+          echo "OLLAMA_MODEL=$model" >> "$GITHUB_ENV"
+
+      - name: Validate cloud secrets
+        env:
+          INPUT_LLM_PROVIDER: ${{ inputs.llm_provider }}
+        run: |
+          if [ "$INPUT_LLM_PROVIDER" = "openai" ] && [ -z "$OPENAI_API_KEY" ]; then
+            echo "OPENAI_API_KEY repository secret is not set."
+            exit 1
+          fi
+          if [ "$INPUT_LLM_PROVIDER" = "gemini" ] && [ -z "$GEMINI_API_KEY$GOOGLE_API_KEY" ]; then
+            echo "GEMINI_API_KEY or GOOGLE_API_KEY repository secret is not set."
+            exit 1
+          fi
+
+      - name: Run LLM task
+        env:
+          INPUT_LLM_PROVIDER: ${{ inputs.llm_provider }}
+          INPUT_LLM_MODEL: ${{ inputs.llm_model }}
+          INPUT_TASK: ${{ inputs.task }}
+        run: |
+          set -o pipefail
+          {
+            echo "## Manual LLM Check"
+            echo ""
+            echo "- Provider: \`$INPUT_LLM_PROVIDER\`"
+            echo "- Requested model: \`${INPUT_LLM_MODEL:-default}\`"
+            echo "- Effective OpenAI model: \`${OPENAI_MODEL:-n/a}\`"
+            echo "- Effective Gemini model: \`${GEMINI_MODEL:-n/a}\`"
+            echo "- Effective Ollama model: \`${OLLAMA_MODEL:-n/a}\`"
+            echo "- Task: \`$INPUT_TASK\`"
+            echo ""
+            echo "\`\`\`json"
+          } >> "$GITHUB_STEP_SUMMARY"
+          python -m adaptive_agent --json "$INPUT_TASK" | tee result.json | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          python - <<'PY'
+          import json
+          import sys
+
+          with open("result.json", encoding="utf-8") as handle:
+              result = json.load(handle)
+          if result.get("action") == "llm_error":
+              print(result.get("output", "LLM check failed"))
+              sys.exit(1)
+          PY

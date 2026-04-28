@@ -64,7 +64,18 @@ class AdaptiveAgent:
             )
 
         state.history.append(Message(role="user", content=task))
-        plan = self._plan_with_llm(task)
+        try:
+            plan = self._plan_with_llm(task)
+        except Exception as exc:
+            state.failure_count += 1
+            state.record_event("failure_classified", reason="external_provider_error")
+            state.record_event("final_response_created", action="llm_error")
+            return AgentResponse(
+                task=task,
+                output=f"LLM 호출 실패: {exc}",
+                action="llm_error",
+                events=state.events,
+            )
         state.step_count += 1
         validation_error = plan.pop("_validation_error", None)
         if validation_error:

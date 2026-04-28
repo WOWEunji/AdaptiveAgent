@@ -41,6 +41,38 @@ def validate_openai_api_key(key: str | None) -> str:
     return k
 
 
+def format_openai_api_error(*, status_code: int | None, message: str, model: str) -> str | None:
+    """OpenAI SDK 오류를 사용자가 바로 조치할 수 있는 메시지로 바꿉니다."""
+
+    if status_code == 401:
+        return (
+            "OpenAI가 API 키를 거부했습니다(401). "
+            ".env의 OPENAI_API_KEY가 유효한 sk- 키인지, 공백·따옴표 오류는 없는지 확인하세요."
+        )
+    if status_code == 400 and "model" in message.lower():
+        return (
+            "OpenAI 모델 요청이 실패했습니다(400). "
+            f"모델명 `{model}`이 현재 계정/API에서 사용 가능한지 확인하세요. "
+            "예: gpt-5-nano 또는 gpt-4o-mini. "
+            f"원본: {message}"
+        )
+    return None
+
+
+def _extract_openai_error_message(exc: Exception) -> str:
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                return str(error.get("message") or "")
+    return str(exc)
+
+
 class OpenAIClient:
     """OpenAI `chat.completions` 또는 `responses` 기반 최소 클라이언트."""
 
@@ -78,12 +110,14 @@ class OpenAIClient:
             choice = response.choices[0].message.content
             return (choice if choice is not None else "").strip()
         except APIError as e:
-            if getattr(e, "status_code", None) == 401:
-                msg = (
-                    "OpenAI가 API 키를 거부했습니다(401). "
-                    ".env의 OPENAI_API_KEY가 유효한 sk- 키인지, 공백·따옴표 오류는 없는지 확인하세요."
-                )
-                raise ValueError(msg) from e
+            message = _extract_openai_error_message(e)
+            formatted = format_openai_api_error(
+                status_code=getattr(e, "status_code", None),
+                message=message,
+                model=self._model,
+            )
+            if formatted:
+                raise ValueError(formatted) from e
             raise
 
     def complete(self, prompt: str) -> str:

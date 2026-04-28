@@ -135,7 +135,9 @@ python3 -m adaptive_agent --tool analyze_requirements
 | OpenAI 자연어 실행 | `llm_provider=openai`, `llm_model=gpt-5-nano`, `task=등록된 툴 목록을 요약해줘` |
 | Gemini 자연어 실행 | `llm_provider=gemini`, `llm_model=gemini-2.5-flash-lite`, `task=다음 구현 단계를 요약해줘` |
 
-OpenAI/Gemini를 사용할 때는 GitHub 저장소 Settings -> Secrets and variables -> Actions에 실제 API key를 repository secret으로 추가해야 한다. placeholder key는 클라이언트 초기화 단계에서 거부된다.
+OpenAI/Gemini를 사용할 때는 GitHub 저장소 Settings -> Secrets and variables -> Actions에 실제 API key를 repository secret으로 추가해야 한다. placeholder key는 클라이언트 초기화 단계에서 거부된다. OpenAI 모델명은 실제 계정에서 사용 가능한 값을 넣어야 하며, 예를 들어 `gpt-5-nano` 또는 `gpt-4o-mini`처럼 존재하는 모델을 사용한다. 존재하지 않는 모델명(예: 임의의 `gpt-5.2-nano`)은 `model_not_found`로 실패한다.
+
+OpenAI/Gemini/Ollama 연결만 빠르게 확인하고 싶으면 Actions의 **Manual LLM Check** workflow를 사용한다. 이 workflow는 수동 실행 전용이며, 실패해도 traceback 대신 JSON 오류와 Actions Summary를 남긴다.
 
 ## Codespace CLI 검증 체크리스트
 
