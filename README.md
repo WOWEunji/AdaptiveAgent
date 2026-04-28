@@ -120,7 +120,11 @@ python3 -m adaptive_agent --json --tool list_files --arg path=adaptive_agent
 python3 -m adaptive_agent --tool analyze_requirements
 ```
 
-필요하면 GitHub Actions에서 `Run workflow`로 수동 실행할 수 있다. `task`, `tool`, `tool_arg` 입력을 바꿔 PR 브랜치의 CLI 결과를 원격 로그에서 확인할 수 있다.
+필요하면 GitHub Actions에서 `Run workflow`로 수동 실행할 수 있다. `task`, `tool`, `tool_arg`, `llm_provider`, `llm_model` 입력을 바꿔 PR 브랜치의 CLI 결과를 원격 로그에서 확인할 수 있다.
+
+- `llm_provider=ollama`: workflow가 Ollama를 설치하고 지정 모델을 pull한 뒤 자연어 task를 실행한다.
+- `llm_provider=openai`: repository secret `OPENAI_API_KEY`가 있을 때 실행한다.
+- `llm_provider=gemini`: repository secret `GEMINI_API_KEY` 또는 `GOOGLE_API_KEY`가 있을 때 실행한다.
 
 ## Codespace CLI 검증 체크리스트
 

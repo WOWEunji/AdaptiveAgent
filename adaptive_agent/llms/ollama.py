@@ -8,13 +8,15 @@ from adaptive_agent.llms.base import LLMClient
 class OllamaClient:
     """로컬 Ollama 모델을 사용하는 LLM 클라이언트."""
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, *, host: str | None = None) -> None:
         self.model = model
+        self.host = host
 
     def generate(self, prompt: str) -> str:
         import ollama
 
-        response = ollama.chat(
+        client = ollama.Client(host=self.host) if self.host else ollama.Client()
+        response = client.chat(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -26,5 +28,5 @@ class OllamaClient:
         return self.generate(prompt)
 
 
-def create_ollama_client(model: str) -> LLMClient:
-    return OllamaClient(model=model)
+def create_ollama_client(model: str, *, host: str | None = None) -> LLMClient:
+    return OllamaClient(model=model, host=host)

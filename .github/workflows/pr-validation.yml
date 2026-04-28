@@ -10,6 +10,14 @@ on:
       - "cursor/**"
   workflow_dispatch:
     inputs:
+      llm_provider:
+        description: "LLM provider for natural language task: ollama, openai, gemini, or none"
+        required: false
+        default: "ollama"
+      llm_model:
+        description: "Optional model override for the selected provider"
+        required: false
+        default: ""
       task:
         description: "Optional natural language task to run through AdaptiveAgent"
         required: false
@@ -61,6 +69,10 @@ jobs:
     name: Manual CLI run
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -76,18 +88,77 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Configure selected LLM provider
+        env:
+          INPUT_LLM_PROVIDER: ${{ inputs.llm_provider }}
+          INPUT_LLM_MODEL: ${{ inputs.llm_model }}
+        run: |
+          provider="$INPUT_LLM_PROVIDER"
+          model="$INPUT_LLM_MODEL"
+          {
+            echo "ADAPTIVE_AGENT_LLM=${provider}"
+            if [ "$provider" = "ollama" ] && [ -n "$model" ]; then
+              echo "OLLAMA_MODEL=${model}"
+            fi
+            if [ "$provider" = "openai" ] && [ -n "$model" ]; then
+              echo "OPENAI_MODEL=${model}"
+            fi
+            if [ "$provider" = "gemini" ] && [ -n "$model" ]; then
+              echo "GEMINI_MODEL=${model}"
+            fi
+          } >> "$GITHUB_ENV"
+
+      - name: Start Ollama for manual LLM run
+        if: ${{ inputs.llm_provider == 'ollama' && inputs.task != '' && inputs.tool == '' }}
+        env:
+          INPUT_LLM_MODEL: ${{ inputs.llm_model }}
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve > ollama.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          model="$INPUT_LLM_MODEL"
+          if [ -z "$model" ]; then
+            model="qwen2.5:1.5b"
+          fi
+          ollama pull "$model"
+          echo "OLLAMA_MODEL=$model" >> "$GITHUB_ENV"
+
+      - name: Validate cloud provider secrets
+        if: ${{ inputs.task != '' && inputs.tool == '' && (inputs.llm_provider == 'openai' || inputs.llm_provider == 'gemini') }}
+        env:
+          INPUT_LLM_PROVIDER: ${{ inputs.llm_provider }}
+        run: |
+          if [ "$INPUT_LLM_PROVIDER" = "openai" ] && [ -z "$OPENAI_API_KEY" ]; then
+            echo "OPENAI_API_KEY repository secret is not set. Add it or choose llm_provider=ollama."
+            exit 1
+          fi
+          if [ "$INPUT_LLM_PROVIDER" = "gemini" ] && [ -z "$GEMINI_API_KEY$GOOGLE_API_KEY" ]; then
+            echo "GEMINI_API_KEY or GOOGLE_API_KEY repository secret is not set. Add one or choose llm_provider=ollama."
+            exit 1
+          fi
+
       - name: Run explicit tool when provided
         if: ${{ inputs.tool != '' }}
+        env:
+          INPUT_TOOL: ${{ inputs.tool }}
+          INPUT_TOOL_ARG: ${{ inputs.tool_arg }}
         run: |
-          if [ -n "${{ inputs.tool_arg }}" ]; then
-            python -m adaptive_agent --json --tool "${{ inputs.tool }}" --arg "${{ inputs.tool_arg }}"
+          if [ -n "$INPUT_TOOL_ARG" ]; then
+            python -m adaptive_agent --json --tool "$INPUT_TOOL" --arg "$INPUT_TOOL_ARG"
           else
-            python -m adaptive_agent --json --tool "${{ inputs.tool }}"
+            python -m adaptive_agent --json --tool "$INPUT_TOOL"
           fi
 
       - name: Run natural language task when provided
         if: ${{ inputs.task != '' && inputs.tool == '' }}
-        run: python -m adaptive_agent --json "${{ inputs.task }}"
+        env:
+          INPUT_TASK: ${{ inputs.task }}
+        run: python -m adaptive_agent --json "$INPUT_TASK"
 
       - name: Show usage when no input provided
         if: ${{ inputs.task == '' && inputs.tool == '' }}
