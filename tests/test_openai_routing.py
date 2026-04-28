@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
+import unittest
 
 from adaptive_agent.llms.openai_client import (
     should_use_openai_responses_api,
@@ -10,18 +10,21 @@ from adaptive_agent.llms.openai_client import (
 )
 
 
-def test_should_use_openai_responses_api_gpt5_family() -> None:
-    assert should_use_openai_responses_api("gpt-5-nano") is True
-    assert should_use_openai_responses_api("gpt-5-nano-2025-08-07") is True
-    assert should_use_openai_responses_api("gpt-4o-mini") is False
-    assert should_use_openai_responses_api("gpt-4.1-nano") is False
+class OpenAIRoutingTest(unittest.TestCase):
+    def test_should_use_openai_responses_api_gpt5_family(self) -> None:
+        self.assertTrue(should_use_openai_responses_api("gpt-5-nano"))
+        self.assertTrue(should_use_openai_responses_api("gpt-5-nano-2025-08-07"))
+        self.assertFalse(should_use_openai_responses_api("gpt-4o-mini"))
+        self.assertFalse(should_use_openai_responses_api("gpt-4.1-nano"))
+
+    def test_validate_openai_api_key_rejects_placeholder(self) -> None:
+        with self.assertRaisesRegex(ValueError, "예시"):
+            validate_openai_api_key("your_openai_key_here")
+
+    def test_validate_openai_api_key_accepts_sk_prefix(self) -> None:
+        key = "sk-" + "a" * 45
+        self.assertEqual(validate_openai_api_key(key), key)
 
 
-def test_validate_openai_api_key_rejects_placeholder() -> None:
-    with pytest.raises(ValueError, match="예시"):
-        validate_openai_api_key("your_openai_key_here")
-
-
-def test_validate_openai_api_key_accepts_sk_prefix() -> None:
-    key = "sk-" + "a" * 45
-    assert validate_openai_api_key(key) == key
+if __name__ == "__main__":
+    unittest.main()

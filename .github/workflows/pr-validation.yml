@@ -1,0 +1,203 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - "cursor/**"
+  workflow_dispatch:
+    inputs:
+      llm_provider:
+        description: "LLM provider for natural language task: ollama, openai, gemini, or none"
+        required: false
+        default: "ollama"
+      llm_model:
+        description: "Optional model override for the selected provider"
+        required: false
+        default: ""
+      task:
+        description: "Optional natural language task to run through AdaptiveAgent"
+        required: false
+        default: ""
+      tool:
+        description: "Optional explicit tool name, e.g. echo or list_files"
+        required: false
+        default: ""
+      tool_arg:
+        description: "Optional tool argument in key=value form"
+        required: false
+        default: ""
+
+jobs:
+  test:
+    name: Unit tests and CLI smoke checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: python -m unittest discover
+
+      - name: Compile source
+        run: python -m compileall adaptive_agent tests
+
+      - name: CLI smoke - list tools
+        run: python -m adaptive_agent --list-tools
+
+      - name: CLI smoke - JSON echo tool
+        run: python -m adaptive_agent --json --tool echo --arg task="hello from ci"
+
+      - name: CLI smoke - requirements analysis
+        run: python -m adaptive_agent --json --tool analyze_requirements
+
+  manual-cli:
+    name: Manual CLI run
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure selected LLM provider
+        env:
+          INPUT_LLM_PROVIDER: ${{ inputs.llm_provider }}
+          INPUT_LLM_MODEL: ${{ inputs.llm_model }}
+        run: |
+          provider="$INPUT_LLM_PROVIDER"
+          model="$INPUT_LLM_MODEL"
+          {
+            echo "ADAPTIVE_AGENT_LLM=${provider}"
+            if [ "$provider" = "ollama" ] && [ -n "$model" ]; then
+              echo "OLLAMA_MODEL=${model}"
+            fi
+            if [ "$provider" = "openai" ] && [ -n "$model" ]; then
+              echo "OPENAI_MODEL=${model}"
+            fi
+            if [ "$provider" = "gemini" ] && [ -n "$model" ]; then
+              echo "GEMINI_MODEL=${model}"
+            fi
+          } >> "$GITHUB_ENV"
+
+      - name: Start Ollama for manual LLM run
+        if: ${{ inputs.llm_provider == 'ollama' && inputs.task != '' && inputs.tool == '' }}
+        env:
+          INPUT_LLM_MODEL: ${{ inputs.llm_model }}
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve > ollama.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          model="$INPUT_LLM_MODEL"
+          if [ -z "$model" ]; then
+            model="qwen2.5:1.5b"
+          fi
+          ollama pull "$model"
+          echo "OLLAMA_MODEL=$model" >> "$GITHUB_ENV"
+
+      - name: Validate cloud provider secrets
+        if: ${{ inputs.task != '' && inputs.tool == '' && (inputs.llm_provider == 'openai' || inputs.llm_provider == 'gemini') }}
+        env:
+          INPUT_LLM_PROVIDER: ${{ inputs.llm_provider }}
+        run: |
+          if [ "$INPUT_LLM_PROVIDER" = "openai" ] && [ -z "$OPENAI_API_KEY" ]; then
+            echo "OPENAI_API_KEY repository secret is not set. Add it or choose llm_provider=ollama."
+            exit 1
+          fi
+          if [ "$INPUT_LLM_PROVIDER" = "gemini" ] && [ -z "$GEMINI_API_KEY$GOOGLE_API_KEY" ]; then
+            echo "GEMINI_API_KEY or GOOGLE_API_KEY repository secret is not set. Add one or choose llm_provider=ollama."
+            exit 1
+          fi
+
+      - name: Run explicit tool when provided
+        if: ${{ inputs.tool != '' }}
+        env:
+          INPUT_TOOL: ${{ inputs.tool }}
+          INPUT_TOOL_ARG: ${{ inputs.tool_arg }}
+        run: |
+          echo "## AdaptiveAgent manual CLI result" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Mode: explicit tool" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tool: \`$INPUT_TOOL\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$INPUT_TOOL_ARG" ]; then
+            echo "- Tool arg: \`$INPUT_TOOL_ARG\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$INPUT_TOOL_ARG" ]; then
+            python -m adaptive_agent --json --tool "$INPUT_TOOL" --arg "$INPUT_TOOL_ARG" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            python -m adaptive_agent --json --tool "$INPUT_TOOL" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run natural language task when provided
+        if: ${{ inputs.task != '' && inputs.tool == '' }}
+        env:
+          INPUT_LLM_PROVIDER: ${{ inputs.llm_provider }}
+          INPUT_LLM_MODEL: ${{ inputs.llm_model }}
+          INPUT_TASK: ${{ inputs.task }}
+        run: |
+          echo "## AdaptiveAgent manual LLM result" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Provider: \`$INPUT_LLM_PROVIDER\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$INPUT_LLM_MODEL" ]; then
+            echo "- Requested model: \`$INPUT_LLM_MODEL\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "- Effective ADAPTIVE_AGENT_LLM: \`$ADAPTIVE_AGENT_LLM\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Effective Ollama model: \`${OLLAMA_MODEL:-n/a}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Effective OpenAI model: \`${OPENAI_MODEL:-n/a}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Effective Gemini model: \`${GEMINI_MODEL:-n/a}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Task: \`$INPUT_TASK\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
+          python -m adaptive_agent --json "$INPUT_TASK" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show usage when no input provided
+        if: ${{ inputs.task == '' && inputs.tool == '' }}
+        run: |
+          python -m adaptive_agent --list-tools
+          {
+            echo "## AdaptiveAgent manual CLI usage"
+            echo ""
+            echo "Provide either \`tool\` or \`task\` in workflow_dispatch inputs."
+            echo ""
+            echo "- Tool example: \`tool=echo\`, \`tool_arg=task=hello\`"
+            echo "- Ollama example: \`llm_provider=ollama\`, \`task=AdaptiveAgent 요약해줘\`"
+            echo "- OpenAI/Gemini require repository secrets."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Provide either 'tool' or 'task' in workflow_dispatch inputs to run an interactive-style remote check."

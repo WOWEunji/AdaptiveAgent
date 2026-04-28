@@ -86,6 +86,11 @@ class OpenAIClient:
                 raise ValueError(msg) from e
             raise
 
+    def complete(self, prompt: str) -> str:
+        """Agent core가 사용하는 표준 completion 인터페이스입니다."""
+
+        return self.generate(prompt)
+
 
 def create_openai_client(model: str, *, api_key: str | None = None) -> LLMClient:
     return OpenAIClient(model=model, api_key=api_key)

@@ -134,6 +134,14 @@ def _result_to_dict(result, tool_name: str | None = None) -> dict[str, object]:
             "output": result.output,
             "tool_name": result.tool_name,
             "action": result.action,
+            "events": [
+                {
+                    "name": event.name,
+                    "details": event.details,
+                    "created_at": event.created_at,
+                }
+                for event in getattr(result, "events", [])
+            ],
         }
 
     return {

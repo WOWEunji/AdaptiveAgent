@@ -10,3 +10,6 @@ class LLMClient(Protocol):
 
     def generate(self, prompt: str) -> str:
         """프롬프트를 전송하고 텍스트 응답을 반환합니다."""
+
+    def complete(self, prompt: str) -> str:
+        """Agent core에서 사용하는 completion 호환 메서드입니다."""
