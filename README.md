@@ -120,11 +120,22 @@ python3 -m adaptive_agent --json --tool list_files --arg path=adaptive_agent
 python3 -m adaptive_agent --tool analyze_requirements
 ```
 
-필요하면 GitHub Actions에서 `Run workflow`로 수동 실행할 수 있다. `task`, `tool`, `tool_arg`, `llm_provider`, `llm_model` 입력을 바꿔 PR 브랜치의 CLI 결과를 원격 로그에서 확인할 수 있다.
+필요하면 GitHub Actions에서 `Run workflow`로 수동 실행할 수 있다. `task`, `tool`, `tool_arg`, `llm_provider`, `llm_model` 입력을 바꿔 PR 브랜치의 CLI 결과를 원격 로그와 Actions Summary에서 확인할 수 있다.
 
 - `llm_provider=ollama`: workflow가 Ollama를 설치하고 지정 모델을 pull한 뒤 자연어 task를 실행한다.
 - `llm_provider=openai`: repository secret `OPENAI_API_KEY`가 있을 때 실행한다.
 - `llm_provider=gemini`: repository secret `GEMINI_API_KEY` 또는 `GOOGLE_API_KEY`가 있을 때 실행한다.
+
+수동 실행 예:
+
+| 목적 | 입력 |
+| --- | --- |
+| 내장 툴 원격 확인 | `tool=echo`, `tool_arg=task=hello` |
+| Ollama 자연어 실행 | `llm_provider=ollama`, `llm_model=qwen2.5:1.5b`, `task=AdaptiveAgent를 한 문장으로 설명해줘` |
+| OpenAI 자연어 실행 | `llm_provider=openai`, `llm_model=gpt-5-nano`, `task=등록된 툴 목록을 요약해줘` |
+| Gemini 자연어 실행 | `llm_provider=gemini`, `llm_model=gemini-2.5-flash-lite`, `task=다음 구현 단계를 요약해줘` |
+
+OpenAI/Gemini를 사용할 때는 GitHub 저장소 Settings -> Secrets and variables -> Actions에 실제 API key를 repository secret으로 추가해야 한다. placeholder key는 클라이언트 초기화 단계에서 거부된다.
 
 ## Codespace CLI 검증 체크리스트
 

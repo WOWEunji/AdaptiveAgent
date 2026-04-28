@@ -25,6 +25,9 @@ class AgentResponse:
     events: list[AgentEvent] = field(default_factory=list)
 
 
+_VALID_PLAN_ACTIONS = {"tool", "respond"}
+
+
 class AdaptiveAgent:
     """자연어 작업을 분석하고 필요한 툴을 실행하는 에이전트 골격."""
 
@@ -63,6 +66,9 @@ class AdaptiveAgent:
         state.history.append(Message(role="user", content=task))
         plan = self._plan_with_llm(task)
         state.step_count += 1
+        validation_error = plan.pop("_validation_error", None)
+        if validation_error:
+            state.record_event("plan_validation_failed", reason=validation_error)
         state.record_event("task_analyzed", action=plan.get("action", "respond"))
         if plan.get("action") == "tool":
             tool_name = str(plan.get("tool_name") or "")
@@ -120,9 +126,52 @@ class AdaptiveAgent:
         except json.JSONDecodeError:
             return {"action": "respond", "response": response}
 
+        return self._normalize_plan(parsed, fallback_response=response)
+
+    def _normalize_plan(self, parsed: object, *, fallback_response: str) -> dict[str, Any]:
+        """LLM 계획 JSON을 Agent가 실행 가능한 최소 계약으로 정규화합니다."""
+
         if not isinstance(parsed, dict):
+            return {
+                "action": "respond",
+                "response": fallback_response,
+                "_validation_error": "plan_not_object",
+            }
+
+        raw_action = parsed.get("action")
+        if raw_action not in _VALID_PLAN_ACTIONS:
+            return {
+                "action": "respond",
+                "response": str(parsed.get("response") or fallback_response),
+                "_validation_error": "unsupported_action",
+            }
+
+        if raw_action == "respond":
+            response = parsed.get("response")
+            if not isinstance(response, str):
+                return {
+                    "action": "respond",
+                    "response": fallback_response,
+                    "_validation_error": "invalid_response",
+                }
             return {"action": "respond", "response": response}
-        return parsed
+
+        tool_name = parsed.get("tool_name")
+        if not isinstance(tool_name, str) or tool_name == "":
+            return {
+                "action": "respond",
+                "response": "LLM 계획에 tool_name이 없어 툴을 실행하지 않았습니다.",
+                "_validation_error": "invalid_tool_name",
+            }
+
+        arguments = parsed.get("arguments", {})
+        if not isinstance(arguments, dict):
+            return {
+                "action": "respond",
+                "response": "툴 실행 인자가 객체가 아니어서 실행하지 않았습니다.",
+                "_validation_error": "invalid_tool_arguments",
+            }
+        return {"action": "tool", "tool_name": tool_name, "arguments": arguments}
 
     def _build_prompt(self, task: str) -> str:
         """LLM에 전달할 기본 지시문을 구성합니다."""
