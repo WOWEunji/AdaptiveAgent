@@ -41,6 +41,11 @@ class GeminiClient:
         self._model = model
         self._api_key = validate_gemini_api_key(_resolve_api_key(api_key))
 
+    def complete(self, prompt: str) -> str:
+        """에이전트 코어가 호출하는 표준 LLM completion 메서드입니다."""
+
+        return self.generate(prompt)
+
     def generate(self, prompt: str) -> str:
         from google import genai
 

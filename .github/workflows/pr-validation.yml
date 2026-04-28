@@ -1,0 +1,99 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - "cursor/**"
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Optional natural language task to run through AdaptiveAgent"
+        required: false
+        default: ""
+      tool:
+        description: "Optional explicit tool name, e.g. echo or list_files"
+        required: false
+        default: ""
+      tool_arg:
+        description: "Optional tool argument in key=value form"
+        required: false
+        default: ""
+
+jobs:
+  test:
+    name: Unit tests and CLI smoke checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run unit tests
+        run: |
+          python -m unittest discover
+          pytest
+
+      - name: Compile source
+        run: python -m compileall adaptive_agent tests
+
+      - name: CLI smoke - list tools
+        run: python -m adaptive_agent --list-tools
+
+      - name: CLI smoke - JSON echo tool
+        run: python -m adaptive_agent --json --tool echo --arg task="hello from ci"
+
+      - name: CLI smoke - requirements analysis
+        run: python -m adaptive_agent --json --tool analyze_requirements
+
+  manual-cli:
+    name: Manual CLI run
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run explicit tool when provided
+        if: ${{ inputs.tool != '' }}
+        run: |
+          if [ -n "${{ inputs.tool_arg }}" ]; then
+            python -m adaptive_agent --json --tool "${{ inputs.tool }}" --arg "${{ inputs.tool_arg }}"
+          else
+            python -m adaptive_agent --json --tool "${{ inputs.tool }}"
+          fi
+
+      - name: Run natural language task when provided
+        if: ${{ inputs.task != '' && inputs.tool == '' }}
+        run: python -m adaptive_agent --json "${{ inputs.task }}"
+
+      - name: Show usage when no input provided
+        if: ${{ inputs.task == '' && inputs.tool == '' }}
+        run: |
+          python -m adaptive_agent --list-tools
+          echo "Provide either 'tool' or 'task' in workflow_dispatch inputs to run an interactive-style remote check."

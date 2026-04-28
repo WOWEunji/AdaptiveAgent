@@ -20,6 +20,11 @@ class OllamaClient:
         )
         return str(response["message"]["content"])
 
+    def complete(self, prompt: str) -> str:
+        """Agent core가 사용하는 표준 completion 인터페이스입니다."""
+
+        return self.generate(prompt)
+
 
 def create_ollama_client(model: str) -> LLMClient:
     return OllamaClient(model=model)

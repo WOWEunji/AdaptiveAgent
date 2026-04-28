@@ -107,6 +107,21 @@ python3 -m unittest discover
 python3 -m compileall adaptive_agent tests
 ```
 
+## PR 검증 파이프라인
+
+GitHub Actions의 `PR Validation` 워크플로는 pull request와 `main` push에서 다음을 실행한다.
+
+```bash
+python3 -m unittest discover
+python3 -m compileall adaptive_agent tests
+python3 -m adaptive_agent --list-tools
+python3 -m adaptive_agent --json --tool echo --arg task="hello from ci"
+python3 -m adaptive_agent --json --tool list_files --arg path=adaptive_agent
+python3 -m adaptive_agent --tool analyze_requirements
+```
+
+필요하면 GitHub Actions에서 `Run workflow`로 수동 실행할 수 있다. `task`, `tool`, `tool_args` 입력을 바꿔 PR 브랜치의 CLI 결과를 원격 로그에서 확인할 수 있다.
+
 ## Codespace CLI 검증 체크리스트
 
 LLM 없이 검증:
