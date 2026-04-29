@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -148,7 +149,7 @@ class LocalSandboxBackend:
     def run_workspace_command(self, command: str, *, timeout_seconds: float) -> dict[str, object]:
         """워크스페이스 복사본에서 프로젝트 명령을 실행합니다."""
 
-        self._enforce_local_policy(command, kind="workspace_command", allow_workspace_reference=True)
+        self._enforce_local_policy(command, kind="workspace_command")
         with tempfile.TemporaryDirectory(prefix="adaptive-agent-workspace-") as temp_dir:
             snapshot = Path(temp_dir) / "workspace"
             self._copy_workspace(snapshot)
@@ -232,17 +233,17 @@ class LocalSandboxBackend:
         payload: str,
         *,
         kind: str,
-        allow_workspace_reference: bool = False,
     ) -> None:
         """컨테이너 없는 로컬 실행에서 실제 환경을 겨냥한 명령을 사전 차단합니다."""
 
-        if not allow_workspace_reference and str(self.workspace) in payload:
+        if str(self.workspace) in payload:
             raise SandboxPolicyViolation("실제 워크스페이스 절대경로 접근은 로컬 정책상 차단됩니다.")
 
         for prefix in _BLOCKED_ABSOLUTE_PREFIXES:
             if prefix == str(self.workspace):
                 continue
-            if f'"{prefix}/' in payload or f"'{prefix}/" in payload:
+            pattern = rf"(?<![A-Za-z0-9_.-]){re.escape(prefix)}(?:/|\b)"
+            if re.search(pattern, payload):
                 raise SandboxPolicyViolation(f"민감한 절대경로 접근은 로컬 정책상 차단됩니다: {prefix}")
 
         if kind in {"shell", "workspace_command"}:

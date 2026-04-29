@@ -91,6 +91,13 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertTrue(result.output["verdict"]["policy_blocked"])
 
+    def test_shell_run_blocks_unquoted_sensitive_absolute_paths(self) -> None:
+        result = self.run_tool("shell_run", {"code": "cat /etc/passwd"})
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.output["verdict"]["policy_blocked"])
+        self.assertIn("/etc", result.error)
+
     def test_file_read_and_write_stay_inside_workspace(self) -> None:
         write_result = self.run_tool("file_write", {"path": "notes/hello.txt", "content": "안녕"})
         read_result = self.run_tool("file_read", {"path": "notes/hello.txt"})
@@ -170,6 +177,21 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertFalse((self.workspace / "created.txt").exists())
         self.assertEqual(result.output["execution"]["sandbox"]["filesystem_isolation"], "workspace_copy")
+
+    def test_test_run_blocks_real_workspace_absolute_path(self) -> None:
+        result = self.run_tool(
+            "test_run",
+            {
+                "command": (
+                    "python3 -c \"from pathlib import Path; "
+                    f"Path({str(self.workspace / 'created.txt')!r}).write_text('x')\""
+                )
+            },
+        )
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.output["verdict"]["policy_blocked"])
+        self.assertFalse((self.workspace / "created.txt").exists())
 
     def test_test_run_skips_workspace_symlinks(self) -> None:
         outside = Path(self.temp_dir.name).parent / "outside-adaptive-agent-test.txt"
