@@ -147,6 +147,8 @@ class AdaptiveAgentTest(unittest.TestCase):
 
         self.assertIn("echo", tool_names)
         self.assertIn("list_files", tool_names)
+        self.assertIn("code_execute", tool_names)
+        self.assertIn("ask_human", tool_names)
 
 
 if __name__ == "__main__":

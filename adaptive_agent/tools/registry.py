@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from adaptive_agent.tools import builtins
 from adaptive_agent.tools.models import Tool, ToolExecutionResult
+from adaptive_agent.tools.sandbox import LocalSandboxBackend
 
 
 class ToolRegistry:
@@ -25,11 +27,17 @@ class ToolRegistry:
         return list(self._tools.values())
 
 
-def create_default_registry(workspace_dir: Path | None = None) -> ToolRegistry:
+def create_default_registry(
+    workspace_dir: Path | None = None,
+    tool_library_dir: Path | None = None,
+) -> ToolRegistry:
     """초기 프로젝트에서 사용할 내장 툴을 등록합니다."""
 
     registry = ToolRegistry()
     workspace = (workspace_dir or Path.cwd()).resolve()
+    tool_library = (tool_library_dir or workspace / ".adaptive_agent" / "tools").resolve()
+    memory_dir = workspace / ".adaptive_agent" / "memory"
+    sandbox = LocalSandboxBackend(workspace)
 
     def echo(arguments: dict[str, object]) -> ToolExecutionResult:
         return ToolExecutionResult(success=True, output=arguments.get("task", ""))
@@ -103,6 +111,173 @@ def create_default_registry(workspace_dir: Path | None = None) -> ToolRegistry:
             handler=list_files,
             category="utility",
             usage="python3 -m adaptive_agent --tool list_files --arg path=adaptive_agent",
+        )
+    )
+    registry.register(
+        Tool(
+            name="code_execute",
+            description="Python 코드를 별도 프로세스의 임시 작업공간에서 실행하고 결과/에러/기대값 판정을 반환합니다.",
+            handler=lambda arguments: builtins.code_execute(arguments, sandbox=sandbox),
+            category="execution",
+            safety_level="high",
+            usage='python3 -m adaptive_agent --json --tool code_execute --arg code="print(1)" --arg lang=python',
+        )
+    )
+    registry.register(
+        Tool(
+            name="shell_run",
+            description="셸 명령을 별도 프로세스의 임시 작업공간에서 실행하고 결과/에러/기대값 판정을 반환합니다.",
+            handler=lambda arguments: builtins.shell_run(arguments, sandbox=sandbox),
+            category="execution",
+            safety_level="high",
+            usage='python3 -m adaptive_agent --json --tool shell_run --arg code="echo ok"',
+        )
+    )
+    registry.register(
+        Tool(
+            name="file_read",
+            description="워크스페이스 내부 UTF-8 텍스트 파일을 읽습니다.",
+            handler=lambda arguments: builtins.file_read(arguments, workspace=workspace),
+            category="filesystem",
+            safety_level="medium",
+            usage="python3 -m adaptive_agent --json --tool file_read --arg path=README.md",
+        )
+    )
+    registry.register(
+        Tool(
+            name="file_write",
+            description="워크스페이스 내부 파일에 UTF-8 텍스트를 씁니다.",
+            handler=lambda arguments: builtins.file_write(arguments, workspace=workspace),
+            category="filesystem",
+            safety_level="high",
+            usage='python3 -m adaptive_agent --json --tool file_write --arg path=notes.txt --arg content="hello"',
+        )
+    )
+    registry.register(
+        Tool(
+            name="file_list",
+            description="워크스페이스 내부 파일/디렉터리를 구조화된 목록으로 조회합니다.",
+            handler=lambda arguments: builtins.file_list(arguments, workspace=workspace),
+            category="filesystem",
+            safety_level="low",
+            usage="python3 -m adaptive_agent --json --tool file_list --arg path=adaptive_agent --arg recursive=true",
+        )
+    )
+    registry.register(
+        Tool(
+            name="file_patch",
+            description="워크스페이스 내부 UTF-8 파일에 단일 텍스트 치환 패치를 적용하거나 diff를 미리 봅니다.",
+            handler=lambda arguments: builtins.file_patch(arguments, workspace=workspace),
+            category="filesystem",
+            safety_level="high",
+            usage='python3 -m adaptive_agent --json --tool file_patch --arg path=notes.txt --arg old_text=old --arg new_text=new --arg dry_run=true',
+        )
+    )
+    registry.register(
+        Tool(
+            name="ask_human",
+            description="사용자에게 질문 또는 선택지를 요청하는 pending_human_input 결과를 반환합니다.",
+            handler=builtins.ask_human,
+            category="human_in_the_loop",
+            safety_level="low",
+            usage='python3 -m adaptive_agent --json --tool ask_human --arg questions="어떤 옵션을 선택할까요?"',
+        )
+    )
+    registry.register(
+        Tool(
+            name="propose_actions",
+            description="실행 전 계획과 위험도를 제시하고 사용자 승인이 필요함을 반환합니다.",
+            handler=builtins.propose_actions,
+            category="human_in_the_loop",
+            safety_level="low",
+            usage='python3 -m adaptive_agent --json --tool propose_actions --arg plan="파일을 수정합니다" --arg risk_level=medium',
+        )
+    )
+    registry.register(
+        Tool(
+            name="test_run",
+            description="프로젝트 테스트 명령을 워크스페이스 복사본에서 실행하고 결과/기대값 판정을 반환합니다.",
+            handler=lambda arguments: builtins.test_run(arguments, sandbox=sandbox),
+            category="execution",
+            safety_level="high",
+            usage='python3 -m adaptive_agent --json --tool test_run --arg command="python3 -m unittest discover"',
+        )
+    )
+    registry.register(
+        Tool(
+            name="tool_create",
+            description="새 Python 도구 코드를 툴 라이브러리에 저장합니다.",
+            handler=lambda arguments: builtins.tool_create(arguments, tool_library=tool_library),
+            category="tool_library",
+            safety_level="high",
+            usage='python3 -m adaptive_agent --json --tool tool_create --arg name=my_tool --arg description="..." --arg code="def run(args): return args"',
+        )
+    )
+    registry.register(
+        Tool(
+            name="tool_search",
+            description="등록된 내장 도구와 저장된 생성 도구를 이름/설명 기준으로 검색합니다.",
+            handler=lambda arguments: builtins.tool_search(
+                arguments,
+                registered_tools=[
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "category": tool.category,
+                        "safety_level": tool.safety_level,
+                        "usage": tool.usage,
+                    }
+                    for tool in registry.list()
+                ],
+                tool_library=tool_library,
+            ),
+            category="tool_library",
+            safety_level="low",
+            usage="python3 -m adaptive_agent --json --tool tool_search --arg query=file",
+        )
+    )
+    registry.register(
+        Tool(
+            name="tool_validate",
+            description="생성된 Python 도구의 문법과 run(arguments) 샘플 실행을 샌드박스에서 검증합니다.",
+            handler=lambda arguments: builtins.tool_validate(
+                arguments,
+                tool_library=tool_library,
+                sandbox=sandbox,
+            ),
+            category="tool_library",
+            safety_level="high",
+            usage="python3 -m adaptive_agent --json --tool tool_validate --arg name=my_tool",
+        )
+    )
+    registry.register(
+        Tool(
+            name="memory_read",
+            description="에이전트 로컬 메모리 값을 읽습니다.",
+            handler=lambda arguments: builtins.memory_read(arguments, memory_dir=memory_dir),
+            category="memory",
+            safety_level="medium",
+            usage="python3 -m adaptive_agent --json --tool memory_read --arg key=preference",
+        )
+    )
+    registry.register(
+        Tool(
+            name="memory_write",
+            description="사용자 승인 후 유지할 에이전트 로컬 메모리 값을 저장합니다.",
+            handler=lambda arguments: builtins.memory_write(arguments, memory_dir=memory_dir),
+            category="memory",
+            safety_level="high",
+            usage='python3 -m adaptive_agent --json --tool memory_write --arg key=preference --arg value="한국어 응답"',
+        )
+    )
+    registry.register(
+        Tool(
+            name="suggest_builtin_tools",
+            description="현재 목록 외에 추가로 유용한 내장 도구 후보와 이유를 반환합니다.",
+            handler=builtins.suggested_builtin_tools,
+            category="planning",
+            safety_level="low",
+            usage="python3 -m adaptive_agent --tool suggest_builtin_tools",
         )
     )
     return registry
