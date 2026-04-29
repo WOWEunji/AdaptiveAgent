@@ -24,6 +24,57 @@ _SNAPSHOT_IGNORE_NAMES = {
     "env",
 }
 
+_BLOCKED_ABSOLUTE_PREFIXES = (
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/home",
+    "/lib",
+    "/lib64",
+    "/opt",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/sys",
+    "/tmp",
+    "/usr",
+    "/var",
+)
+
+_BLOCKED_SHELL_PATTERNS = (
+    " rm ",
+    " rm\t",
+    " rm\n",
+    "rm ",
+    "rm\t",
+    "rm\n",
+    "mv /",
+    "cp /",
+    "chmod ",
+    "chown ",
+    "sudo ",
+    "su ",
+    "mkfs",
+    "mount ",
+    "umount ",
+    "dd ",
+    "curl ",
+    "wget ",
+    "nc ",
+    "netcat ",
+    "ssh ",
+    "scp ",
+    "rsync ",
+    "> /",
+    ">> /",
+)
+
+
+class SandboxPolicyViolation(ValueError):
+    """로컬 정책상 허용하지 않는 실행 요청입니다."""
+
 
 @dataclass(frozen=True)
 class SandboxResult:
@@ -68,6 +119,7 @@ class LocalSandboxBackend:
     def run_python_code(self, code: str, *, timeout_seconds: float) -> dict[str, object]:
         """Python 코드를 임시 디렉터리의 별도 인터프리터에서 실행합니다."""
 
+        self._enforce_local_policy(code, kind="python")
         with tempfile.TemporaryDirectory(prefix="adaptive-agent-code-") as temp_dir:
             temp_path = Path(temp_dir)
             script_path = temp_path / "snippet.py"
@@ -83,6 +135,7 @@ class LocalSandboxBackend:
     def run_shell(self, code: str, *, shell_binary: str, timeout_seconds: float) -> dict[str, object]:
         """셸 코드를 임시 디렉터리의 별도 프로세스에서 실행합니다."""
 
+        self._enforce_local_policy(code, kind="shell")
         with tempfile.TemporaryDirectory(prefix="adaptive-agent-shell-") as temp_dir:
             return self._run_process(
                 [shell_binary, "-c", code],
@@ -95,6 +148,7 @@ class LocalSandboxBackend:
     def run_workspace_command(self, command: str, *, timeout_seconds: float) -> dict[str, object]:
         """워크스페이스 복사본에서 프로젝트 명령을 실행합니다."""
 
+        self._enforce_local_policy(command, kind="workspace_command", allow_workspace_reference=True)
         with tempfile.TemporaryDirectory(prefix="adaptive-agent-workspace-") as temp_dir:
             snapshot = Path(temp_dir) / "workspace"
             self._copy_workspace(snapshot)
@@ -107,10 +161,16 @@ class LocalSandboxBackend:
             )
 
     def _copy_workspace(self, destination: Path) -> None:
-        def ignore(_directory: str, names: list[str]) -> set[str]:
-            return {name for name in names if name in _SNAPSHOT_IGNORE_NAMES or name.endswith(".pyc")}
+        def ignore(directory: str, names: list[str]) -> set[str]:
+            return {
+                name
+                for name in names
+                if name in _SNAPSHOT_IGNORE_NAMES
+                or name.endswith(".pyc")
+                or (Path(directory) / name).is_symlink()
+            }
 
-        shutil.copytree(self.workspace, destination, ignore=ignore)
+        shutil.copytree(self.workspace, destination, ignore=ignore, symlinks=True)
 
     def _run_process(
         self,
@@ -157,7 +217,6 @@ class LocalSandboxBackend:
     @staticmethod
     def _safe_environment(temp_dir: Path) -> dict[str, str]:
         path = os.environ.get("PATH", "/usr/bin:/bin")
-        python_path = os.environ.get("PYTHONPATH")
         env = {
             "PATH": path,
             "HOME": str(temp_dir),
@@ -166,9 +225,31 @@ class LocalSandboxBackend:
             "LC_ALL": "C.UTF-8",
             "PYTHONIOENCODING": "utf-8",
         }
-        if python_path:
-            env["PYTHONPATH"] = python_path
         return env
+
+    def _enforce_local_policy(
+        self,
+        payload: str,
+        *,
+        kind: str,
+        allow_workspace_reference: bool = False,
+    ) -> None:
+        """컨테이너 없는 로컬 실행에서 실제 환경을 겨냥한 명령을 사전 차단합니다."""
+
+        if not allow_workspace_reference and str(self.workspace) in payload:
+            raise SandboxPolicyViolation("실제 워크스페이스 절대경로 접근은 로컬 정책상 차단됩니다.")
+
+        for prefix in _BLOCKED_ABSOLUTE_PREFIXES:
+            if prefix == str(self.workspace):
+                continue
+            if f'"{prefix}/' in payload or f"'{prefix}/" in payload:
+                raise SandboxPolicyViolation(f"민감한 절대경로 접근은 로컬 정책상 차단됩니다: {prefix}")
+
+        if kind in {"shell", "workspace_command"}:
+            normalized = f" {payload.strip()} ".lower()
+            for pattern in _BLOCKED_SHELL_PATTERNS:
+                if pattern in normalized:
+                    raise SandboxPolicyViolation(f"위험한 shell 패턴이 차단되었습니다: {pattern.strip()}")
 
 
 def _decode_timeout_output(value: bytes | str | None) -> str:

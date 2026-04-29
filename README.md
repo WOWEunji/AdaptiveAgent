@@ -169,6 +169,7 @@ python3 -m adaptive_agent "AdaptiveAgent의 다음 구현 단계를 요약해줘
 - LLM 구현은 `LLMClient` 프로토콜 뒤에 숨겨 OpenAI, Anthropic, Grok 등을 추가하기 쉽게 했습니다.
 - 툴은 `Tool` 모델로 등록하고 `ToolExecutor`가 표준 결과로 감싸 실행합니다.
 - `code_execute`, `shell_run`, `test_run`, `tool_validate`는 `LocalSandboxBackend`를 통해 별도 프로세스에서 실행하며 stdout/stderr/exit code/timeout/기대값 판정을 구조화해 반환합니다.
+- `LocalSandboxBackend`는 실제 워크스페이스 절대경로, 민감 절대경로, 파괴적 shell 패턴, 워크스페이스 symlink 복사를 로컬 정책으로 차단합니다.
 - `test_run`은 현재 워크스페이스 복사본에서 프로젝트 명령을 실행해 실제 작업 디렉터리에 테스트 산출물을 남기지 않습니다.
 - `ask_human`과 `propose_actions`는 실제 승인을 대신하지 않고 `pending_human_input` 또는 `approval_required` 상태를 반환해 상위 루프가 멈출 수 있게 합니다.
 - `file_patch`는 전체 덮어쓰기 대신 단일 텍스트 치환과 dry-run diff를 지원합니다.
@@ -181,7 +182,7 @@ python3 -m adaptive_agent "AdaptiveAgent의 다음 구현 단계를 요약해줘
 
 ## 현재 한계와 다음 단계
 
-- 현재 샌드박스는 표준 라이브러리 기반 `LocalSandboxBackend`입니다. 별도 프로세스, 최소 환경 변수, 임시 디렉터리/워크스페이스 복사본 격리를 제공하지만 컨테이너/VM 수준의 완전 격리는 아닙니다.
+- 현재 샌드박스는 표준 라이브러리 기반 `LocalSandboxBackend`입니다. 별도 프로세스, 최소 환경 변수, 임시 디렉터리/워크스페이스 복사본 격리와 로컬 정책 차단을 제공하지만 컨테이너/VM 수준의 완전 격리는 아닙니다.
 - 자연어 task 처리는 LLM 연결이 필요합니다. LLM 없이 검증할 때는 `--tool`로 내장 툴을 명시 실행합니다.
 - 외부 provider 어댑터는 아직 패키지에 추가하지 않았으며, 현재는 Ollama부터 시작합니다.
 - 생성 툴의 보안 정책, 중복 제거, self-correction 반복 제한 정책은 다음 구현 단계에서 강화해야 합니다.

@@ -75,6 +75,22 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertTrue(result.output["execution"]["timed_out"])
         self.assertEqual(result.output["execution"]["exit_code"], 124)
 
+    def test_code_execute_blocks_real_workspace_absolute_path(self) -> None:
+        result = self.run_tool(
+            "code_execute",
+            {"code": f"open({str(self.workspace / 'leak.txt')!r}, 'w').write('x')"},
+        )
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.output["verdict"]["policy_blocked"])
+        self.assertFalse((self.workspace / "leak.txt").exists())
+
+    def test_shell_run_blocks_destructive_patterns(self) -> None:
+        result = self.run_tool("shell_run", {"code": "rm -rf created.txt"})
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.output["verdict"]["policy_blocked"])
+
     def test_file_read_and_write_stay_inside_workspace(self) -> None:
         write_result = self.run_tool("file_write", {"path": "notes/hello.txt", "content": "안녕"})
         read_result = self.run_tool("file_read", {"path": "notes/hello.txt"})
@@ -155,6 +171,26 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertFalse((self.workspace / "created.txt").exists())
         self.assertEqual(result.output["execution"]["sandbox"]["filesystem_isolation"], "workspace_copy")
 
+    def test_test_run_skips_workspace_symlinks(self) -> None:
+        outside = Path(self.temp_dir.name).parent / "outside-adaptive-agent-test.txt"
+        outside.write_text("secret", encoding="utf-8")
+        try:
+            (self.workspace / "outside_link.txt").symlink_to(outside)
+            result = self.run_tool(
+                "test_run",
+                {
+                    "command": (
+                        "python3 -c \"from pathlib import Path; "
+                        "print(Path('outside_link.txt').exists())\""
+                    ),
+                    "expected_stdout_contains": "False",
+                },
+            )
+        finally:
+            outside.unlink(missing_ok=True)
+
+        self.assertTrue(result.success)
+
     def test_tool_create_and_search_generated_tool_metadata(self) -> None:
         create_result = self.run_tool(
             "tool_create",
@@ -194,6 +230,27 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.output["tool"]["status"], "validated")
         self.assertIn('"hello": "Ada"', result.output["execution"]["stdout"])
+
+    def test_tool_validate_policy_blocks_generated_tool_side_effects(self) -> None:
+        self.run_tool(
+            "tool_create",
+            {
+                "name": "side_effect_tool",
+                "description": "Attempts a real workspace write",
+                "code": (
+                    f"from pathlib import Path\n"
+                    f"Path({str(self.workspace / 'side_effect.txt')!r}).write_text('x')\n"
+                    "def run(arguments):\n"
+                    "    return {'ok': True}\n"
+                ),
+            },
+        )
+
+        result = self.run_tool("tool_validate", {"name": "side_effect_tool"})
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.output["verdict"]["policy_blocked"])
+        self.assertFalse((self.workspace / "side_effect.txt").exists())
 
     def test_tool_search_finds_builtin_tools(self) -> None:
         result = self.run_tool("tool_search", {"query": "file"})

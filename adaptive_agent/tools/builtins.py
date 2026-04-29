@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from adaptive_agent.tools.models import ToolExecutionResult
-from adaptive_agent.tools.sandbox import LocalSandboxBackend
+from adaptive_agent.tools.sandbox import LocalSandboxBackend, SandboxPolicyViolation
 
 _SUPPORTED_CODE_LANGS = {"python", "py"}
 _SUPPORTED_SHELL_LANGS = {"bash", "sh", "shell"}
@@ -34,7 +34,10 @@ def code_execute(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) 
         )
 
     timeout_seconds = _coerce_timeout(arguments.get("timeout_seconds"))
-    output = sandbox.run_python_code(code, timeout_seconds=timeout_seconds)
+    try:
+        output = sandbox.run_python_code(code, timeout_seconds=timeout_seconds)
+    except SandboxPolicyViolation as exc:
+        return _policy_violation_result(str(exc))
     return _result_from_process(output, arguments)
 
 
@@ -54,7 +57,10 @@ def shell_run(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> 
 
     timeout_seconds = _coerce_timeout(arguments.get("timeout_seconds"))
     shell_binary = "/bin/bash" if lang in {"bash", "shell"} else "/bin/sh"
-    output = sandbox.run_shell(code, shell_binary=shell_binary, timeout_seconds=timeout_seconds)
+    try:
+        output = sandbox.run_shell(code, shell_binary=shell_binary, timeout_seconds=timeout_seconds)
+    except SandboxPolicyViolation as exc:
+        return _policy_violation_result(str(exc))
     return _result_from_process(output, arguments)
 
 
@@ -247,7 +253,10 @@ def test_run(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> T
 
     command = str(arguments.get("command") or "python3 -m unittest discover")
     timeout_seconds = _coerce_timeout(arguments.get("timeout_seconds"), default=60.0, maximum=300.0)
-    output = sandbox.run_workspace_command(command, timeout_seconds=timeout_seconds)
+    try:
+        output = sandbox.run_workspace_command(command, timeout_seconds=timeout_seconds)
+    except SandboxPolicyViolation as exc:
+        return _policy_violation_result(str(exc))
     return _result_from_process(output, arguments)
 
 
@@ -310,16 +319,22 @@ def tool_validate(
 
     sample_arguments = arguments.get("sample_arguments", {})
     runner = (
-        "import importlib.util, json\n"
-        f"spec = importlib.util.spec_from_file_location({name!r}, {str(code_path)!r})\n"
-        "module = importlib.util.module_from_spec(spec)\n"
-        "spec.loader.exec_module(module)\n"
-        "if not hasattr(module, 'run'):\n"
+        "import json\n"
+        f"generated_code = {code!r}\n"
+        "namespace = {}\n"
+        "exec(compile(generated_code, '<generated_tool>', 'exec'), namespace)\n"
+        "if 'run' not in namespace:\n"
         "    raise AttributeError('generated tool must define run(arguments)')\n"
-        f"result = module.run({sample_arguments!r})\n"
+        f"result = namespace['run']({sample_arguments!r})\n"
         "print(json.dumps(result, ensure_ascii=False, sort_keys=True))\n"
     )
-    process_output = sandbox.run_python_code(runner, timeout_seconds=_coerce_timeout(arguments.get("timeout_seconds")))
+    try:
+        process_output = sandbox.run_python_code(
+            runner,
+            timeout_seconds=_coerce_timeout(arguments.get("timeout_seconds")),
+        )
+    except SandboxPolicyViolation as exc:
+        return _policy_violation_result(str(exc))
     result = _result_from_process(process_output, arguments)
     if result.success:
         metadata_path = tool_library / f"{name}.json"
@@ -405,6 +420,20 @@ def _result_from_process(process_output: dict[str, object], arguments: dict[str,
     output = {"execution": process_output, "verdict": expectation}
     error = None if success else _build_execution_error(process_output, expectation)
     return ToolExecutionResult(success=success, output=output, error=error)
+
+
+def _policy_violation_result(message: str) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        success=False,
+        output={
+            "execution": None,
+            "verdict": {
+                "matches_expectation": False,
+                "policy_blocked": True,
+            },
+        },
+        error=message,
+    )
 
 
 def _evaluate_expectations(process_output: dict[str, object], arguments: dict[str, object]) -> dict[str, object]:
