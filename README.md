@@ -144,6 +144,17 @@ OpenAI/Gemini를 사용할 때는 GitHub 저장소 Settings -> Secrets and varia
 
 OpenAI/Gemini/Ollama 연결만 빠르게 확인하고 싶으면 Actions의 **Manual LLM Check** workflow를 사용한다. 이 workflow는 수동 실행 전용이며, 실패해도 traceback 대신 JSON 오류와 Actions Summary를 남긴다.
 
+AAVS 시나리오 기반으로 OpenAI 또는 Ollama가 적절한 툴 호출과 구조화 데이터 파싱 코드를 생성하는지 확인하려면 같은 workflow에서 `validation_suite=aavs`를 선택한다. OpenAI는 repository secret `OPENAI_API_KEY`를 사용하고, Ollama는 workflow runner에서 Ollama를 설치한 뒤 선택 모델을 pull한다.
+
+로컬에서 provider가 준비된 경우에는 아래처럼 직접 실행할 수 있다.
+
+```bash
+python scripts/aavs_validate.py --provider openai --model gpt-5-nano --output-dir aavs-results-openai
+python scripts/aavs_validate.py --provider ollama --model qwen2.5:1.5b --output-dir aavs-results-ollama
+```
+
+검증 프롬프트는 영어로 작성되어 있으며, 특정 정답만 맞히도록 유도하지 않고 JSON/CSV 같은 구조화 데이터는 표준 파서를 사용한 실행 가능한 Python 코드로 처리하도록 일반 원칙을 확인한다.
+
 ## Codespace CLI 검증 체크리스트
 
 LLM 없이 검증:

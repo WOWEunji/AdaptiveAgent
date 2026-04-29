@@ -84,12 +84,38 @@ class AdaptiveAgentTest(unittest.TestCase):
             [
                 "task_received",
                 "task_analyzed",
+                "tool_spec_created",
                 "tool_execution_requested",
                 "tool_executed",
                 "tool_result_observed",
                 "final_response_created",
             ],
         )
+
+    def test_code_tool_plan_records_created_code_event(self) -> None:
+        llm = StubLLM(
+            '{"action":"tool","tool_name":"code_execute","arguments":'
+            '{"code":"print(225)","expected_output":"225"}}'
+        )
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+
+        result = agent.run("구조화 데이터를 계산해줘")
+
+        event_names = [event.name for event in result.events]
+        self.assertEqual(result.action, "tool")
+        self.assertIn("tool_spec_created", event_names)
+        self.assertIn("tool_code_created", event_names)
+
+    def test_prompt_instructs_general_structured_data_tool_use(self) -> None:
+        llm = StubLLM()
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+
+        agent.run("아래 JSON을 분석해줘: []")
+
+        prompt = llm.prompts[0]
+        self.assertIn("Use tools for deterministic work", prompt)
+        self.assertIn("standard parsers such as json or csv", prompt)
+        self.assertIn("not code tailored to a single expected answer", prompt)
 
     def test_tool_plan_without_tool_name_is_rejected(self) -> None:
         llm = StubLLM('{"action":"tool","arguments":{"task":"원문 그대로"}}')
