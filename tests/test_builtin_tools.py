@@ -66,6 +66,7 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertIn("ok", result.output["execution"]["stdout"])
         self.assertFalse((self.workspace / "created.txt").exists())
         self.assertEqual(result.output["execution"]["sandbox"]["working_directory"], "temporary")
+        self.assertEqual(result.output["execution"]["sandbox"]["backend"], "local_process")
 
     def test_shell_run_timeout_is_reported_as_failure(self) -> None:
         result = self.run_tool("shell_run", {"code": "sleep 1", "timeout_seconds": "0.1"})
@@ -94,6 +95,36 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertFalse((self.workspace / ".env").exists())
         self.assertIn("민감한 경로", result.error)
 
+    def test_file_list_returns_structured_entries(self) -> None:
+        (self.workspace / "src").mkdir()
+        (self.workspace / "src" / "app.py").write_text("print('ok')", encoding="utf-8")
+        (self.workspace / "src" / ".env").write_text("SECRET=1", encoding="utf-8")
+
+        result = self.run_tool("file_list", {"path": ".", "pattern": "*.py", "recursive": "true"})
+
+        self.assertTrue(result.success)
+        paths = {entry["path"] for entry in result.output["entries"]}
+        self.assertIn("src/app.py", paths)
+        self.assertNotIn("src/.env", paths)
+
+    def test_file_patch_supports_dry_run_and_apply(self) -> None:
+        target = self.workspace / "notes.txt"
+        target.write_text("hello old\n", encoding="utf-8")
+
+        dry_run = self.run_tool(
+            "file_patch",
+            {"path": "notes.txt", "old_text": "old", "new_text": "new", "dry_run": "true"},
+        )
+        apply_result = self.run_tool(
+            "file_patch",
+            {"path": "notes.txt", "old_text": "old", "new_text": "new"},
+        )
+
+        self.assertTrue(dry_run.success)
+        self.assertIn("-hello old", dry_run.output["diff"])
+        self.assertEqual(target.read_text(encoding="utf-8"), "hello new\n")
+        self.assertTrue(apply_result.success)
+
     def test_human_in_the_loop_tools_return_pending_state(self) -> None:
         ask_result = self.run_tool(
             "ask_human",
@@ -110,6 +141,19 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertTrue(propose_result.success)
         self.assertEqual(propose_result.output["status"], "approval_required")
         self.assertFalse(propose_result.output["approved"])
+
+    def test_test_run_uses_workspace_copy(self) -> None:
+        result = self.run_tool(
+            "test_run",
+            {
+                "command": "python3 -c \"from pathlib import Path; Path('created.txt').write_text('x'); print('ok')\"",
+                "expected_stdout_contains": "ok",
+            },
+        )
+
+        self.assertTrue(result.success)
+        self.assertFalse((self.workspace / "created.txt").exists())
+        self.assertEqual(result.output["execution"]["sandbox"]["filesystem_isolation"], "workspace_copy")
 
     def test_tool_create_and_search_generated_tool_metadata(self) -> None:
         create_result = self.run_tool(
@@ -128,6 +172,29 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertTrue(search_result.success)
         self.assertIn("hello_tool", {match["name"] for match in search_result.output["matches"]})
 
+    def test_tool_validate_runs_generated_tool_in_sandbox(self) -> None:
+        self.run_tool(
+            "tool_create",
+            {
+                "name": "hello_tool",
+                "description": "Greets a user",
+                "code": "def run(arguments):\n    return {'hello': arguments.get('name')}\n",
+            },
+        )
+
+        result = self.run_tool(
+            "tool_validate",
+            {
+                "name": "hello_tool",
+                "sample_arguments": {"name": "Ada"},
+                "expected_output": '"hello": "Ada"',
+            },
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output["tool"]["status"], "validated")
+        self.assertIn('"hello": "Ada"', result.output["execution"]["stdout"])
+
     def test_tool_search_finds_builtin_tools(self) -> None:
         result = self.run_tool("tool_search", {"query": "file"})
 
@@ -136,13 +203,21 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertIn("file_read", names)
         self.assertIn("file_write", names)
 
-    def test_suggest_builtin_tools_includes_additional_candidates(self) -> None:
+    def test_memory_read_and_write_store_structured_values(self) -> None:
+        write_result = self.run_tool("memory_write", {"key": "preference", "value": "한국어"})
+        read_result = self.run_tool("memory_read", {"key": "preference"})
+
+        self.assertTrue(write_result.success)
+        self.assertTrue(read_result.success)
+        self.assertEqual(read_result.output["value"], "한국어")
+
+    def test_suggest_builtin_tools_includes_remaining_candidates(self) -> None:
         result = self.run_tool("suggest_builtin_tools", {})
 
         self.assertTrue(result.success)
         names = {candidate["name"] for candidate in result.output}
-        self.assertIn("file_patch", names)
-        self.assertIn("tool_validate", names)
+        self.assertIn("artifact_store", names)
+        self.assertIn("web_fetch", names)
 
 
 if __name__ == "__main__":

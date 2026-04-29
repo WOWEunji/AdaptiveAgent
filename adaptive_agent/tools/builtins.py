@@ -3,18 +3,14 @@
 from __future__ import annotations
 
 import ast
+import difflib
 import json
-import os
 import re
-import shlex
-import subprocess
-import sys
-import tempfile
-import time
 from pathlib import Path
 from typing import Any
 
 from adaptive_agent.tools.models import ToolExecutionResult
+from adaptive_agent.tools.sandbox import LocalSandboxBackend
 
 _SUPPORTED_CODE_LANGS = {"python", "py"}
 _SUPPORTED_SHELL_LANGS = {"bash", "sh", "shell"}
@@ -23,7 +19,7 @@ _BLOCKED_PATH_PARTS = {".git", "__pycache__", ".pytest_cache", ".mypy_cache"}
 _BLOCKED_FILENAMES = {".env"}
 
 
-def code_execute(arguments: dict[str, object]) -> ToolExecutionResult:
+def code_execute(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> ToolExecutionResult:
     """코드를 별도 프로세스의 임시 작업공간에서 실행하고 판정 정보를 반환합니다."""
 
     code = str(arguments.get("code") or "")
@@ -38,15 +34,11 @@ def code_execute(arguments: dict[str, object]) -> ToolExecutionResult:
         )
 
     timeout_seconds = _coerce_timeout(arguments.get("timeout_seconds"))
-    with tempfile.TemporaryDirectory(prefix="adaptive-agent-code-") as temp_dir:
-        script_path = Path(temp_dir) / "snippet.py"
-        script_path.write_text(code, encoding="utf-8")
-        command = [sys.executable, "-I", str(script_path)]
-        output = _run_subprocess(command, cwd=Path(temp_dir), timeout_seconds=timeout_seconds)
+    output = sandbox.run_python_code(code, timeout_seconds=timeout_seconds)
     return _result_from_process(output, arguments)
 
 
-def shell_run(arguments: dict[str, object]) -> ToolExecutionResult:
+def shell_run(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> ToolExecutionResult:
     """셸 명령을 별도 프로세스의 임시 작업공간에서 실행하고 판정 정보를 반환합니다."""
 
     code = str(arguments.get("code") or arguments.get("command") or "")
@@ -62,9 +54,7 @@ def shell_run(arguments: dict[str, object]) -> ToolExecutionResult:
 
     timeout_seconds = _coerce_timeout(arguments.get("timeout_seconds"))
     shell_binary = "/bin/bash" if lang in {"bash", "shell"} else "/bin/sh"
-    with tempfile.TemporaryDirectory(prefix="adaptive-agent-shell-") as temp_dir:
-        command = [shell_binary, "-c", code]
-        output = _run_subprocess(command, cwd=Path(temp_dir), timeout_seconds=timeout_seconds)
+    output = sandbox.run_shell(code, shell_binary=shell_binary, timeout_seconds=timeout_seconds)
     return _result_from_process(output, arguments)
 
 
@@ -124,6 +114,91 @@ def file_write(arguments: dict[str, object], *, workspace: Path) -> ToolExecutio
     )
 
 
+def file_list(arguments: dict[str, object], *, workspace: Path) -> ToolExecutionResult:
+    """워크스페이스 내부 파일/디렉터리를 구조화된 목록으로 반환합니다."""
+
+    raw_path = str(arguments.get("path") or ".")
+    pattern = str(arguments.get("pattern") or "*")
+    recursive = _coerce_bool(arguments.get("recursive"), default=False)
+    max_entries = _coerce_int(arguments.get("max_entries"), default=200, minimum=1, maximum=1000)
+    resolved = _resolve_workspace_path(workspace, raw_path)
+    if isinstance(resolved, ToolExecutionResult):
+        return resolved
+    if not resolved.exists():
+        return ToolExecutionResult(success=False, output="", error=f"경로를 찾을 수 없습니다: {raw_path}")
+
+    if resolved.is_file():
+        entries = [_file_entry(resolved, workspace)]
+    else:
+        iterator = resolved.rglob(pattern) if recursive else resolved.glob(pattern)
+        entries = [
+            _file_entry(path, workspace)
+            for path in sorted(iterator)
+            if path != resolved and not _is_blocked_path(path, workspace)
+        ]
+    truncated = len(entries) > max_entries
+    return ToolExecutionResult(
+        success=True,
+        output={
+            "path": str(resolved.relative_to(workspace)) if resolved != workspace else ".",
+            "pattern": pattern,
+            "recursive": recursive,
+            "entries": entries[:max_entries],
+            "truncated": truncated,
+        },
+    )
+
+
+def file_patch(arguments: dict[str, object], *, workspace: Path) -> ToolExecutionResult:
+    """단일 UTF-8 텍스트 파일에서 old_text를 new_text로 치환합니다."""
+
+    raw_path = str(arguments.get("path") or "")
+    old_text = arguments.get("old_text")
+    new_text = arguments.get("new_text")
+    if old_text is None or new_text is None:
+        return ToolExecutionResult(success=False, output="", error="old_text와 new_text 인자가 필요합니다.")
+
+    resolved = _resolve_workspace_path(workspace, raw_path)
+    if isinstance(resolved, ToolExecutionResult):
+        return resolved
+    if _is_blocked_path(resolved, workspace):
+        return ToolExecutionResult(success=False, output="", error="민감한 경로에는 패치를 적용할 수 없습니다.")
+    if not resolved.is_file():
+        return ToolExecutionResult(success=False, output="", error=f"파일이 아닙니다: {raw_path}")
+
+    content = resolved.read_text(encoding="utf-8")
+    occurrence_count = content.count(str(old_text))
+    if occurrence_count == 0:
+        return ToolExecutionResult(success=False, output="", error="old_text가 파일에서 발견되지 않았습니다.")
+    if occurrence_count > 1 and not _coerce_bool(arguments.get("replace_all"), default=False):
+        return ToolExecutionResult(success=False, output="", error="old_text가 여러 번 발견되었습니다. replace_all=true가 필요합니다.")
+
+    replacement_count = occurrence_count if _coerce_bool(arguments.get("replace_all"), default=False) else 1
+    updated = content.replace(str(old_text), str(new_text), replacement_count)
+    preview = _unified_diff_preview(content, updated, raw_path)
+    if _coerce_bool(arguments.get("dry_run"), default=False):
+        return ToolExecutionResult(
+            success=True,
+            output={
+                "path": str(resolved.relative_to(workspace)),
+                "dry_run": True,
+                "replacements": replacement_count,
+                "diff": preview,
+            },
+        )
+
+    resolved.write_text(updated, encoding="utf-8")
+    return ToolExecutionResult(
+        success=True,
+        output={
+            "path": str(resolved.relative_to(workspace)),
+            "dry_run": False,
+            "replacements": replacement_count,
+            "diff": preview,
+        },
+    )
+
+
 def ask_human(arguments: dict[str, object]) -> ToolExecutionResult:
     """사용자 질문/선택 요청을 에이전트가 멈춰 처리할 수 있게 구조화합니다."""
 
@@ -167,6 +242,15 @@ def propose_actions(arguments: dict[str, object]) -> ToolExecutionResult:
     )
 
 
+def test_run(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> ToolExecutionResult:
+    """프로젝트 테스트 명령을 워크스페이스 복사본에서 실행합니다."""
+
+    command = str(arguments.get("command") or "python3 -m unittest discover")
+    timeout_seconds = _coerce_timeout(arguments.get("timeout_seconds"), default=60.0, maximum=300.0)
+    output = sandbox.run_workspace_command(command, timeout_seconds=timeout_seconds)
+    return _result_from_process(output, arguments)
+
+
 def tool_create(arguments: dict[str, object], *, tool_library: Path) -> ToolExecutionResult:
     """새 툴 코드를 툴 라이브러리에 저장합니다. 코드는 저장 전 문법만 검증합니다."""
 
@@ -202,6 +286,50 @@ def tool_create(arguments: dict[str, object], *, tool_library: Path) -> ToolExec
     return ToolExecutionResult(success=True, output=metadata)
 
 
+def tool_validate(
+    arguments: dict[str, object],
+    *,
+    tool_library: Path,
+    sandbox: LocalSandboxBackend,
+) -> ToolExecutionResult:
+    """생성된 Python 도구의 문법과 샘플 실행 가능성을 검증합니다."""
+
+    name = str(arguments.get("name") or "")
+    if not _SAFE_NAME_PATTERN.match(name):
+        return ToolExecutionResult(success=False, output="", error="name은 영문/숫자/밑줄 2~64자여야 합니다.")
+
+    code_path = tool_library / f"{name}.py"
+    if not code_path.exists():
+        return ToolExecutionResult(success=False, output="", error=f"생성된 툴을 찾을 수 없습니다: {name}")
+
+    code = code_path.read_text(encoding="utf-8")
+    try:
+        ast.parse(code)
+    except SyntaxError as exc:
+        return ToolExecutionResult(success=False, output="", error=f"Python 문법 오류: {exc}")
+
+    sample_arguments = arguments.get("sample_arguments", {})
+    runner = (
+        "import importlib.util, json\n"
+        f"spec = importlib.util.spec_from_file_location({name!r}, {str(code_path)!r})\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "if not hasattr(module, 'run'):\n"
+        "    raise AttributeError('generated tool must define run(arguments)')\n"
+        f"result = module.run({sample_arguments!r})\n"
+        "print(json.dumps(result, ensure_ascii=False, sort_keys=True))\n"
+    )
+    process_output = sandbox.run_python_code(runner, timeout_seconds=_coerce_timeout(arguments.get("timeout_seconds")))
+    result = _result_from_process(process_output, arguments)
+    if result.success:
+        metadata_path = tool_library / f"{name}.json"
+        metadata = _read_json_object(metadata_path)
+        metadata.update({"status": "validated", "validated": True})
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        result.output["tool"] = metadata
+    return result
+
+
 def tool_search(
     arguments: dict[str, object],
     *,
@@ -224,6 +352,34 @@ def tool_search(
     return ToolExecutionResult(success=True, output={"query": query, "matches": candidates})
 
 
+def memory_read(arguments: dict[str, object], *, memory_dir: Path) -> ToolExecutionResult:
+    """에이전트 로컬 메모리 JSON 값을 읽습니다."""
+
+    key = str(arguments.get("key") or "")
+    resolved = _resolve_memory_path(memory_dir, key)
+    if isinstance(resolved, ToolExecutionResult):
+        return resolved
+    if not resolved.exists():
+        return ToolExecutionResult(success=False, output="", error=f"메모리를 찾을 수 없습니다: {key}")
+    return ToolExecutionResult(success=True, output=_read_json_object(resolved))
+
+
+def memory_write(arguments: dict[str, object], *, memory_dir: Path) -> ToolExecutionResult:
+    """사용자 승인 이후 저장할 수 있는 에이전트 로컬 메모리 값을 씁니다."""
+
+    key = str(arguments.get("key") or "")
+    value = arguments.get("value")
+    if value is None:
+        return ToolExecutionResult(success=False, output="", error="value 인자가 필요합니다.")
+    resolved = _resolve_memory_path(memory_dir, key)
+    if isinstance(resolved, ToolExecutionResult):
+        return resolved
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"key": key, "value": value}
+    resolved.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return ToolExecutionResult(success=True, output=payload)
+
+
 def suggested_builtin_tools(_arguments: dict[str, object]) -> ToolExecutionResult:
     """현재 내장 툴 외에 다음 단계에서 유용한 후보를 반환합니다."""
 
@@ -231,65 +387,15 @@ def suggested_builtin_tools(_arguments: dict[str, object]) -> ToolExecutionResul
         success=True,
         output=[
             {
-                "name": "file_list",
-                "reason": "워크스페이스 탐색을 file_read와 분리하면 LLM이 경로 후보를 안전하게 좁힐 수 있습니다.",
+                "name": "artifact_store",
+                "reason": "실행 로그, diff, 생성 파일을 PR/리포트에 연결할 수 있는 산출물 저장 계층이 필요합니다.",
             },
             {
-                "name": "file_patch",
-                "reason": "전체 파일 덮어쓰기보다 작은 diff 적용을 제공하면 변경 위험을 줄일 수 있습니다.",
-            },
-            {
-                "name": "test_run",
-                "reason": "프로젝트별 테스트 명령을 표준 결과와 함께 실행하면 self-correction 루프가 단순해집니다.",
-            },
-            {
-                "name": "tool_validate",
-                "reason": "tool_create 이후 문법뿐 아니라 샌드박스 실행과 샘플 입력 검증을 별도 단계로 둘 수 있습니다.",
-            },
-            {
-                "name": "memory_read_write",
-                "reason": "사용자 승인 후 반복 작업 선호나 툴 사용 히스토리를 저장하는 계층이 필요합니다.",
+                "name": "web_fetch",
+                "reason": "공식 문서 확인이 필요한 구현에서 네트워크 조회를 명시적인 도구로 분리할 수 있습니다.",
             },
         ],
     )
-
-
-def _run_subprocess(command: list[str], *, cwd: Path, timeout_seconds: float) -> dict[str, object]:
-    start = time.monotonic()
-    timed_out = False
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=str(cwd),
-            env=_safe_environment(cwd),
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-        exit_code = completed.returncode
-        stdout = completed.stdout
-        stderr = completed.stderr
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        exit_code = 124
-        stdout = _decode_timeout_output(exc.stdout)
-        stderr = _decode_timeout_output(exc.stderr) or f"Timed out after {timeout_seconds:g}s"
-    duration_ms = int((time.monotonic() - start) * 1000)
-    return {
-        "command": shlex.join(command),
-        "exit_code": exit_code,
-        "stdout": stdout,
-        "stderr": stderr,
-        "duration_ms": duration_ms,
-        "timed_out": timed_out,
-        "sandbox": {
-            "process_isolated": True,
-            "working_directory": "temporary",
-            "environment": "minimal",
-            "filesystem_isolation": "temporary_cwd_only",
-        },
-    }
 
 
 def _result_from_process(process_output: dict[str, object], arguments: dict[str, object]) -> ToolExecutionResult:
@@ -337,26 +443,22 @@ def _build_execution_error(process_output: dict[str, object], expectation: dict[
     return "프로세스는 실행되었지만 기대 결과 검증에 실패했습니다."
 
 
-def _safe_environment(temp_dir: Path) -> dict[str, str]:
-    path = os.environ.get("PATH", "/usr/bin:/bin")
-    return {
-        "PATH": path,
-        "HOME": str(temp_dir),
-        "TMPDIR": str(temp_dir),
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
-        "PYTHONIOENCODING": "utf-8",
-    }
-
-
-def _coerce_timeout(raw_timeout: object) -> float:
+def _coerce_timeout(raw_timeout: object, *, default: float = 5.0, maximum: float = 30.0) -> float:
     if raw_timeout is None:
-        return 5.0
+        return default
     try:
         timeout = float(raw_timeout)
     except (TypeError, ValueError):
-        return 5.0
-    return min(max(timeout, 0.1), 30.0)
+        return default
+    return min(max(timeout, 0.1), maximum)
+
+
+def _coerce_int(raw_value: object, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(value, minimum), maximum)
 
 
 def _coerce_bool(raw_value: object, *, default: bool) -> bool:
@@ -387,6 +489,26 @@ def _is_blocked_path(path: Path, workspace: Path) -> bool:
     return path.name in _BLOCKED_FILENAMES
 
 
+def _file_entry(path: Path, workspace: Path) -> dict[str, object]:
+    stat = path.stat()
+    return {
+        "path": str(path.relative_to(workspace)),
+        "type": "directory" if path.is_dir() else "file",
+        "size_bytes": stat.st_size if path.is_file() else None,
+    }
+
+
+def _unified_diff_preview(before: str, after: str, path: str) -> str:
+    return "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"{path}:before",
+            tofile=f"{path}:after",
+        )
+    )
+
+
 def _load_generated_tool_metadata(tool_library: Path) -> list[dict[str, Any]]:
     if not tool_library.exists():
         return []
@@ -403,9 +525,21 @@ def _load_generated_tool_metadata(tool_library: Path) -> list[dict[str, Any]]:
     return tools
 
 
-def _decode_timeout_output(value: bytes | str | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
+def _read_json_object(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _resolve_memory_path(memory_dir: Path, key: str) -> Path | ToolExecutionResult:
+    if not _SAFE_NAME_PATTERN.match(key):
+        return ToolExecutionResult(success=False, output="", error="key는 영문/숫자/밑줄 2~64자여야 합니다.")
+    memory_dir = memory_dir.resolve()
+    candidate = (memory_dir / f"{key}.json").resolve()
+    if memory_dir != candidate.parent:
+        return ToolExecutionResult(success=False, output="", error="메모리 경로가 허용 범위를 벗어났습니다.")
+    return candidate
