@@ -59,16 +59,26 @@ jobs:
         run: |
           provider="$INPUT_LLM_PROVIDER"
           model="$INPUT_LLM_MODEL"
+          if [ "$provider" = "ollama" ] && { [ -z "$model" ] || [ "$model" = "gpt-5-nano" ]; }; then
+            model="qwen2.5:1.5b"
+          fi
+          if [ "$provider" = "gemini" ] && { [ -z "$model" ] || [ "$model" = "gpt-5-nano" ]; }; then
+            model="gemini-2.5-flash-lite"
+          fi
+          if [ "$provider" = "openai" ] && [ -z "$model" ]; then
+            model="gpt-5-nano"
+          fi
           {
             echo "ADAPTIVE_AGENT_LLM=$provider"
+            echo "EFFECTIVE_LLM_MODEL=$model"
             if [ "$provider" = "openai" ]; then
-              echo "OPENAI_MODEL=${model:-gpt-5-nano}"
+              echo "OPENAI_MODEL=$model"
             fi
             if [ "$provider" = "gemini" ]; then
-              echo "GEMINI_MODEL=${model:-gemini-2.5-flash-lite}"
+              echo "GEMINI_MODEL=$model"
             fi
             if [ "$provider" = "ollama" ]; then
-              echo "OLLAMA_MODEL=${model:-qwen2.5:1.5b}"
+              echo "OLLAMA_MODEL=$model"
             fi
           } >> "$GITHUB_ENV"
 
@@ -85,8 +95,8 @@ jobs:
             fi
             sleep 2
           done
-          model="$INPUT_LLM_MODEL"
-          if [ -z "$model" ]; then
+          model="${EFFECTIVE_LLM_MODEL:-$INPUT_LLM_MODEL}"
+          if [ -z "$model" ] || [ "$model" = "gpt-5-nano" ]; then
             model="qwen2.5:1.5b"
           fi
           ollama pull "$model"
@@ -116,7 +126,7 @@ jobs:
           mkdir -p "$output_dir"
           python scripts/aavs_validate.py \
             --provider "$INPUT_LLM_PROVIDER" \
-            --model "$INPUT_LLM_MODEL" \
+            --model "${EFFECTIVE_LLM_MODEL:-$INPUT_LLM_MODEL}" \
             --output "$output_dir/records.json" \
             --markdown-output "$output_dir/records.md" \
             --scenario AAVS-001 \
@@ -128,6 +138,7 @@ jobs:
             echo ""
             echo "- Provider: \`$INPUT_LLM_PROVIDER\`"
             echo "- Requested model: \`${INPUT_LLM_MODEL:-default}\`"
+            echo "- Effective model: \`${EFFECTIVE_LLM_MODEL:-default}\`"
             echo "- Output directory: \`$output_dir\`"
             echo ""
             echo "\`\`\`"

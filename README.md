@@ -155,6 +155,8 @@ python scripts/aavs_validate.py --provider ollama --model qwen2.5:1.5b --output-
 
 검증 프롬프트는 영어로 작성되어 있으며, 특정 정답만 맞히도록 유도하지 않고 JSON/CSV 같은 구조화 데이터는 표준 파서를 사용한 실행 가능한 Python 코드로 처리하도록 일반 원칙을 확인한다.
 
+현재 자동 하네스는 AAVS-001, AAVS-003A/B, AAVS-006을 대상으로 한다. AAVS-002(self-correction), AAVS-004(저장 동의 y/n), AAVS-005(저장 툴 재사용)는 에이전트 루프와 툴 저장 정책이 확장된 뒤 별도 자동 검증으로 추가해야 한다. 또한 현재 Agent는 툴 실행 후 자연어 최종 답변을 다시 합성하지 않고 raw tool output을 반환하므로, 하네스의 `final_response_scope` 필드는 `raw_tool_output`으로 기록된다.
+
 ## Codespace CLI 검증 체크리스트
 
 LLM 없이 검증:

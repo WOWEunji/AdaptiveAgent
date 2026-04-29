@@ -16,13 +16,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SUPPORTED_SCENARIOS = ", ".join(scenario_id for scenario_id in ("AAVS-001", "AAVS-003A", "AAVS-003B", "AAVS-006"))
+UNSUPPORTED_SCENARIOS_NOTE = (
+    "This harness currently automates provider-facing checks for "
+    f"{SUPPORTED_SCENARIOS}. AAVS-002, AAVS-004, and AAVS-005 still require "
+    "agent self-correction and persistent tool-library workflows that are not implemented in the current CLI loop."
+)
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,7 @@ class ScenarioRecord:
     checks: dict[str, bool]
     passed: bool
     failure_classification: str
+    validation_scope: dict[str, Any]
     notes: str = ""
 
     def to_markdown(self) -> str:
@@ -69,6 +76,7 @@ class ScenarioRecord:
         events = [event.get("name") for event in result.get("events", []) if isinstance(event, dict)]
         output = result.get("output", "")
         tool_name = result.get("tool_name")
+        scope = self.validation_scope
         return "\n".join(
             [
                 "## 실행 기록",
@@ -87,6 +95,7 @@ class ScenarioRecord:
                 "- 자가 수정 횟수: 이벤트 기반 별도 확인 필요",
                 "- 사용자 추가 입력 여부: ask_human/clarification 이벤트 기반 확인",
                 "- 저장 동의 결과: 이벤트 기반 별도 확인 필요",
+                f"- 검증 범위: {json.dumps(scope, ensure_ascii=False)}",
                 f"- 최종 응답: {json.dumps(output, ensure_ascii=False)[:2000]}",
                 f"- 통과/실패: {'통과' if self.passed else '실패'}",
                 f"- 실패 원인 분류: {self.failure_classification}",
@@ -182,6 +191,7 @@ def main() -> int:
 
     requested = set((args.scenario or []) + (args.scenarios or []))
     selected = [scenario for scenario in SCENARIOS if not requested or scenario.scenario_id in requested]
+    print(UNSUPPORTED_SCENARIOS_NOTE, file=sys.stderr)
     env = os.environ.copy()
     env["ADAPTIVE_AGENT_LLM"] = args.provider
     model = args.model or default_model(args.provider, env)
@@ -265,6 +275,7 @@ def run_scenario(
         checks=checks,
         passed=passed,
         failure_classification=classify_failure(completed.returncode, parsed, checks),
+        validation_scope=build_validation_scope(parsed),
         notes=scenario.notes,
     )
 
@@ -323,6 +334,34 @@ def classify_failure(returncode: int, parsed: dict[str, Any] | None, checks: dic
     if not checks.get("any_expected_event", True):
         return "사용자 입력 부족 처리 오류"
     return "검증 기준 미충족"
+
+
+def build_validation_scope(parsed: dict[str, Any] | None) -> dict[str, Any]:
+    """검증이 최종 자연어 응답까지 포함하는지, raw tool output에 머무는지 명시합니다."""
+
+    if parsed is None:
+        return {
+            "agent_result_available": False,
+            "raw_tool_output_checked": False,
+            "final_user_response_checked": False,
+            "note": "CLI did not return parseable JSON.",
+        }
+
+    action = parsed.get("action")
+    tool_name = parsed.get("tool_name")
+    raw_tool_output = action == "tool" and tool_name is not None
+    return {
+        "agent_result_available": True,
+        "raw_tool_output_checked": raw_tool_output,
+        "final_user_response_checked": action == "llm",
+        "note": (
+            "Current AdaptiveAgent returns the structured tool execution result directly after tool use; "
+            "these scenarios validate tool choice, generated code, events, and raw execution output, "
+            "not a second natural-language answer synthesis step."
+            if raw_tool_output
+            else "Scenario validation is based on the agent response payload."
+        ),
+    }
 
 
 def utc_now() -> str:
