@@ -40,7 +40,10 @@ class AdaptiveAgent:
     ) -> None:
         self.config = config or AgentConfig.from_env()
         self.llm_client = llm_client or create_llm_client(self.config)
-        self.registry = registry or create_default_registry(self.config.workspace_dir)
+        self.registry = registry or create_default_registry(
+            self.config.workspace_dir,
+            tool_library_dir=self.config.tool_library_dir,
+        )
         self.executor = executor or ToolExecutor(self.registry)
 
     def list_tools(self) -> list:
