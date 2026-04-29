@@ -20,6 +20,13 @@ class StubLLM:
         return self.response
 
 
+class FailingLLM:
+    """테스트용 실패 LLM 클라이언트."""
+
+    def complete(self, _prompt: str) -> str:
+        raise ValueError("LLM 연결 실패")
+
+
 class AdaptiveAgentTest(unittest.TestCase):
     def test_empty_task_only_rejects_exact_empty_string(self) -> None:
         agent = AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM())
@@ -53,6 +60,15 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertEqual(result.output, "LLM 응답")
         self.assertIsNone(result.tool_name)
         self.assertIn("echo 안녕하세요", llm.prompts[0])
+
+    def test_llm_error_returns_structured_response(self) -> None:
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=FailingLLM())
+
+        result = agent.run("OpenAI 연결 확인")
+
+        self.assertEqual(result.action, "llm_error")
+        self.assertEqual(result.output, "LLM 호출 실패: LLM 연결 실패")
+        self.assertIn("failure_classified", [event.name for event in result.events])
 
     def test_llm_json_plan_executes_tool(self) -> None:
         llm = StubLLM('{"action":"tool","tool_name":"echo","arguments":{"task":"원문 그대로"}}')
