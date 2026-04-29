@@ -89,6 +89,16 @@ class AdaptiveAgent:
             arguments = plan.get("arguments")
             if not isinstance(arguments, dict):
                 arguments = {}
+            state.record_event(
+                "tool_spec_created",
+                tool_name=tool_name,
+                argument_keys=sorted(str(key) for key in arguments),
+            )
+            code = arguments.get("code")
+            if isinstance(code, str) and code:
+                state.record_event("tool_code_created", tool_name=tool_name, code=code)
+            if tool_name == "ask_human":
+                state.record_event("clarification_requested", reason="llm_requested_human_input")
             state.record_event("tool_execution_requested", tool_name=tool_name)
             result = self.run_tool(tool_name, arguments)
             state.record_event("tool_executed", tool_name=tool_name, success=result.success)
@@ -199,8 +209,17 @@ class AdaptiveAgent:
             for tool in self.registry.list()
         ]
         return (
-            "You are AdaptiveAgent. Keep the user's task exactly as provided: do not rewrite, "
-            "trim, translate, change casing, or transform it. Decide using the original task only.\n"
+            "You are AdaptiveAgent, a tool-using CLI agent. Keep the user's task exactly as "
+            "provided: do not rewrite, trim, translate, change casing, or transform it. Decide "
+            "using the original task only.\n"
+            "Use tools for deterministic work, structured data processing, file operations, "
+            "tests, or calculations. For JSON, CSV, or other structured data, prefer Python code "
+            "through code_execute and use standard parsers such as json or csv; do not parse "
+            "structured data with regular expressions or brittle string splitting. If a task is "
+            "ambiguous, requires missing private credentials/data, or requires user permission, "
+            "call ask_human instead of guessing. Do not fabricate external data or credentials. "
+            "For one-off deterministic analysis, generate general Python code that solves the "
+            "class of task, not code tailored to a single expected answer.\n"
             "Return only JSON in one of these forms:\n"
             '{"action":"tool","tool_name":"<tool name>","arguments":{...}}\n'
             '{"action":"respond","response":"<answer>"}\n'
