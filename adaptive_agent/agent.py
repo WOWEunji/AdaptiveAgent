@@ -66,7 +66,9 @@ class AdaptiveAgent:
                 create_state=self._create_state,
                 plan_with_llm=self._plan_with_llm,
                 run_normalized_plan=self._run_normalized_plan,
+                critique_execution=self._critique_execution_with_llm,
                 make_response=AgentResponse,
+                max_steps=self.config.max_router_steps,
             )
         )
 
@@ -111,15 +113,18 @@ class AdaptiveAgent:
         }
         self._record_tool_result(state, tool_name, result.success, result.error)
         if result.success:
+            if tool_name in {"ask_human", "propose_actions"}:
+                state.next_node = "approve"
+                state.record_event("final_response_created", action="tool")
+                return AgentResponse(
+                    task=task,
+                    output=result.output,
+                    tool_name=tool_name,
+                    action="tool",
+                    events=state.events,
+                )
             state.next_node = "critique"
-            state.record_event("final_response_created", action="tool")
-            return AgentResponse(
-                task=task,
-                output=result.output,
-                tool_name=tool_name,
-                action="tool",
-                events=state.events,
-            )
+            return None
 
         state.failure_count += 1
         state.error_log = str(result.error or "")
@@ -178,15 +183,18 @@ class AdaptiveAgent:
             }
             self._record_tool_result(state, tool_name, result.success, result.error)
             if result.success:
+                if tool_name in {"ask_human", "propose_actions"}:
+                    state.next_node = "approve"
+                    state.record_event("final_response_created", action="tool")
+                    return AgentResponse(
+                        task=task,
+                        output=result.output,
+                        tool_name=tool_name,
+                        action="tool",
+                        events=state.events,
+                    )
                 state.next_node = "critique"
-                state.record_event("final_response_created", action="tool")
-                return AgentResponse(
-                    task=task,
-                    output=result.output,
-                    tool_name=tool_name,
-                    action="tool",
-                    events=state.events,
-                )
+                return None
             state.failure_count += 1
             state.error_log = str(result.error or "")
             state.reflections.append(f"tool_execution_error:{tool_name}:{result.error}")
@@ -268,6 +276,16 @@ class AdaptiveAgent:
         except json.JSONDecodeError:
             parsed = response
         return self._normalize_plan(parsed, fallback_response=response)
+
+    def _critique_execution_with_llm(self, state: AgentState) -> dict[str, Any]:
+        """Create a normalized critique verdict from the latest execution state."""
+
+        response = self.llm_client.complete(self._build_critic_prompt(state))
+        try:
+            parsed = self._loads_plan_json(response)
+        except json.JSONDecodeError:
+            parsed = response
+        return self._normalize_critique(parsed, fallback_response=response)
 
     def _loads_plan_json(self, response: str) -> object:
         """Decode nested or fenced LLM plan JSON into a Python object."""
@@ -403,6 +421,48 @@ class AdaptiveAgent:
             }
         arguments = self._normalize_tool_arguments(tool_name, arguments, parsed)
         return {"action": "tool", "tool_name": tool_name, "arguments": arguments}
+
+    def _normalize_critique(self, parsed: object, *, fallback_response: str) -> dict[str, Any]:
+        """Normalize critic output to verdict, reason, reflection, and next_node."""
+
+        if not isinstance(parsed, dict):
+            return {
+                "verdict": "success",
+                "reason": "critic returned non-JSON output after successful execution",
+                "reflection": str(fallback_response),
+                "next_node": "done",
+                "_validation_error": "critic_not_object",
+            }
+
+        raw_verdict = str(parsed.get("verdict") or "").strip().lower().replace("-", "_")
+        verdict_aliases = {
+            "accepted": "success",
+            "pass": "success",
+            "passed": "success",
+            "retryable": "retry",
+            "retry_needed": "retry",
+            "human": "needs_human",
+            "input_required": "needs_human",
+        }
+        verdict = verdict_aliases.get(raw_verdict, raw_verdict)
+        if verdict not in {"success", "retry", "needs_human", "unsafe", "failed"}:
+            verdict = "success"
+
+        next_node = parsed.get("next_node")
+        if not isinstance(next_node, str) or next_node not in {"plan", "approve", "store", "done", "error"}:
+            next_node = {
+                "success": "done",
+                "retry": "plan",
+                "needs_human": "approve",
+                "unsafe": "error",
+                "failed": "error",
+            }[verdict]
+        return {
+            "verdict": verdict,
+            "reason": str(parsed.get("reason") or ""),
+            "reflection": str(parsed.get("reflection") or ""),
+            "next_node": next_node,
+        }
 
     def _normalize_plan_action_alias(self, parsed: dict[str, Any]) -> dict[str, Any]:
         """Map node-level plan actions to the executable plan contract."""
@@ -565,6 +625,18 @@ class AdaptiveAgent:
             failed_plan=json.dumps(failed_plan, ensure_ascii=False),
             error=error,
             output=json.dumps(output, ensure_ascii=False, default=str),
+        )
+
+    def _build_critic_prompt(self, state: AgentState) -> str:
+        """Render the Critic Agent prompt from the latest execution state."""
+
+        return self.prompt_loader.render(
+            "critic.txt",
+            task=state.user_task,
+            current_plan=json.dumps(state.current_plan, ensure_ascii=False, default=str),
+            last_tool_result=json.dumps(state.last_tool_result, ensure_ascii=False, default=str),
+            error_log=state.error_log,
+            reflections=json.dumps(state.reflections, ensure_ascii=False, default=str),
         )
 
     def _create_state(self) -> AgentState:

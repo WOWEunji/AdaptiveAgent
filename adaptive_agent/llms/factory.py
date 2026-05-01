@@ -11,7 +11,13 @@ def create_llm_client(config: AgentConfig, provider: str | None = None) -> LLMCl
     """Create an LLM client for the selected provider."""
     selected_provider = (provider or config.llm_provider).lower()
     if selected_provider == "ollama":
-        return OllamaClient(model=config.ollama_model, host=config.ollama_host)
+        return OllamaClient(
+            model=config.ollama_model,
+            host=config.ollama_host,
+            timeout_seconds=config.ollama_timeout_seconds,
+            num_predict=config.ollama_num_predict,
+            think=config.ollama_think,
+        )
     if selected_provider == "openai":
         from adaptive_agent.llms.openai_client import OpenAIClient
 

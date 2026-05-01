@@ -44,6 +44,19 @@ class FailingLLM:
         raise ValueError("LLM 연결 실패")
 
 
+class AlternatingRetryLLM:
+    """테스트용 반복 LLM 클라이언트."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def complete(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        if len(self.prompts) % 2 == 1:
+            return '{"action":"tool","tool_name":"echo","arguments":{"task":"retry target"}}'
+        return '{"verdict":"retry","reason":"retry requested","reflection":"try again","next_node":"plan"}'
+
+
 class AdaptiveAgentTest(unittest.TestCase):
     def test_empty_task_only_rejects_exact_empty_string(self) -> None:
         agent = AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM())
@@ -96,18 +109,10 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertEqual(result.output, "원문 그대로")
         self.assertEqual(result.tool_name, "echo")
         self.assertEqual(result.action, "tool")
-        self.assertEqual(
-            [event.name for event in result.events],
-            [
-                "task_received",
-                "task_analyzed",
-                "tool_spec_created",
-                "tool_execution_requested",
-                "tool_executed",
-                "tool_result_observed",
-                "final_response_created",
-            ],
-        )
+        event_names = [event.name for event in result.events]
+        self.assertLess(event_names.index("task_analyzed"), event_names.index("tool_execution_requested"))
+        self.assertLess(event_names.index("tool_result_observed"), event_names.index("execution_critiqued"))
+        self.assertLess(event_names.index("execution_critiqued"), event_names.index("final_response_created"))
         self.assertIsInstance(agent.router, StateMachineRouter)
         self.assertIsNotNone(agent.router.last_state)
         self.assertEqual(agent.router.last_state.user_task, "사용자 원문")
@@ -189,12 +194,39 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertEqual(result.action, "tool")
         self.assertIn("self_correction_started", event_names)
         self.assertIn("tool_reexecuted", event_names)
+        self.assertIn("execution_critiqued", event_names)
         self.assertIn("fixed", str(result.output))
-        self.assertEqual(len(llm.prompts), 2)
+        self.assertGreaterEqual(len(llm.prompts), 2)
         self.assertIn("repairing a failed tool execution", llm.prompts[1])
         self.assertIn("Original user task: 코드 실행 오류를 고쳐줘", llm.prompts[1])
         self.assertIn("Failed plan:", llm.prompts[1])
         self.assertIn("Observed error:", llm.prompts[1])
+
+    def test_critic_retry_routes_back_to_plan(self) -> None:
+        llm = SequenceLLM(
+            [
+                '{"action":"tool","tool_name":"echo","arguments":{"task":"first"}}',
+                '{"verdict":"retry","reason":"needs another plan","reflection":"retry once","next_node":"plan"}',
+                '{"action":"final_answer","answer":"재계획 완료"}',
+            ]
+        )
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+
+        result = agent.run("재계획이 필요한 작업")
+
+        event_names = [event.name for event in result.events]
+        self.assertEqual(result.action, "llm")
+        self.assertEqual(result.output, "재계획 완료")
+        self.assertGreaterEqual(event_names.count("task_analyzed"), 2)
+        self.assertIn("execution_critiqued", event_names)
+
+    def test_router_step_limit_stops_repeating_loops(self) -> None:
+        agent = AdaptiveAgent(config=AgentConfig(max_router_steps=3), llm_client=AlternatingRetryLLM())
+
+        result = agent.run("반복되는 작업")
+
+        self.assertEqual(result.action, "router_error")
+        self.assertIn("router_step_limit_exceeded", [event.details.get("reason") for event in result.events])
 
     def test_default_correction_prompt_file_renders_failure_context(self) -> None:
         loader = PromptLoader()

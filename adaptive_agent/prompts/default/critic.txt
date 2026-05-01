@@ -32,3 +32,10 @@ QUALITY BAR
 OUTPUT
 - Return only raw JSON, with no Markdown fences:
 {"verdict":"success|retry|needs_human|unsafe|failed","reason":"<short reason>","reflection":"<reusable lesson>","next_node":"code|approve|store|done|error"}
+
+CONTEXT
+Original user task: {task}
+Current plan: {current_plan}
+Latest tool result: {last_tool_result}
+Error log: {error_log}
+Prior reflections: {reflections}
