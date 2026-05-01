@@ -190,8 +190,7 @@ def main() -> int:
     parser.add_argument("--output-dir", default="", help="Directory for records.json and records.md")
     parser.add_argument(
         "--timeout-seconds",
-        type=float,
-        default=None,
+        default="",
         help="Per-scenario CLI timeout. Defaults to 180s for OpenAI and 600s for Ollama.",
     )
     args = parser.parse_args()
@@ -208,7 +207,7 @@ def main() -> int:
         env["OLLAMA_MODEL"] = model
 
     records: list[ScenarioRecord] = []
-    timeout_seconds = args.timeout_seconds or default_timeout_seconds(args.provider)
+    timeout_seconds = parse_timeout_seconds(args.timeout_seconds, args.provider)
     for scenario in selected:
         records.append(
             run_scenario(
@@ -253,6 +252,17 @@ def default_timeout_seconds(provider: str) -> float:
     """Ollama runs locally on a CPU GitHub runner, so it needs a longer per-scenario budget."""
 
     return 600.0 if provider == "ollama" else 180.0
+
+
+def parse_timeout_seconds(raw_timeout: str, provider: str) -> float:
+    """빈 workflow 입력값은 provider별 기본 timeout으로 처리합니다."""
+
+    if not raw_timeout.strip():
+        return default_timeout_seconds(provider)
+    try:
+        return float(raw_timeout)
+    except ValueError as exc:
+        raise SystemExit(f"--timeout-seconds must be a number, got: {raw_timeout!r}") from exc
 
 
 def run_scenario(
