@@ -9,7 +9,9 @@ from typing import Any
 from adaptive_agent.config import AgentConfig
 from adaptive_agent.llms.base import LLMClient
 from adaptive_agent.llms.factory import create_llm_client
-from adaptive_agent.state import AgentEvent, AgentState, Message, ToolSchema
+from adaptive_agent.prompts import PromptLoader
+from adaptive_agent.router import RouterDependencies, StateMachineRouter
+from adaptive_agent.state import AgentEvent, AgentState, ToolSchema
 from adaptive_agent.tools.executor import ToolExecutor
 from adaptive_agent.tools.registry import ToolRegistry, create_default_registry
 
@@ -49,6 +51,7 @@ class AdaptiveAgent:
         llm_client: LLMClient | None = None,
         registry: ToolRegistry | None = None,
         executor: ToolExecutor | None = None,
+        prompt_loader: PromptLoader | None = None,
     ) -> None:
         self.config = config or AgentConfig.from_env()
         self.llm_client = llm_client or create_llm_client(self.config)
@@ -57,6 +60,15 @@ class AdaptiveAgent:
             tool_library_dir=self.config.tool_library_dir,
         )
         self.executor = executor or ToolExecutor(self.registry)
+        self.prompt_loader = prompt_loader or PromptLoader()
+        self.router = StateMachineRouter(
+            RouterDependencies(
+                create_state=self._create_state,
+                plan_with_llm=self._plan_with_llm,
+                run_normalized_plan=self._run_normalized_plan,
+                make_response=AgentResponse,
+            )
+        )
 
     def list_tools(self) -> list:
         """현재 등록된 툴 목록을 반환합니다."""
@@ -65,50 +77,7 @@ class AdaptiveAgent:
 
     def run(self, task: str) -> AgentResponse:
         """사용자 원문 task를 LLM 계획에 따라 수행합니다."""
-        state = self._create_state()
-        state.record_event("task_received", task=task)
-
-        if task == "":
-            state.record_event("clarification_requested", reason="empty_task")
-            state.record_event("final_response_created", action="input_required")
-            return AgentResponse(
-                task=task,
-                output="작업 내용을 입력해 주세요.",
-                action="input_required",
-                events=state.events,
-            )
-
-        state.history.append(Message(role="user", content=task))
-        try:
-            plan = self._plan_with_llm(task)
-        except Exception as exc:
-            state.failure_count += 1
-            state.record_event("failure_classified", reason="external_provider_error")
-            state.record_event("final_response_created", action="llm_error")
-            return AgentResponse(
-                task=task,
-                output=f"LLM 호출 실패: {exc}",
-                action="llm_error",
-                events=state.events,
-            )
-        state.step_count += 1
-        validation_error = plan.pop("_validation_error", None)
-        if validation_error:
-            state.record_event("plan_validation_failed", reason=validation_error)
-        state.record_event("task_analyzed", action=plan.get("action", "respond"))
-        response = self._run_normalized_plan(task, plan, state)
-        if response is not None:
-            return response
-
-        if plan.get("needs_user_input"):
-            state.record_event("clarification_requested", reason="llm_requested_user_input")
-        state.record_event("final_response_created", action="llm")
-        return AgentResponse(
-            task=task,
-            output=plan.get("response", ""),
-            action="llm",
-            events=state.events,
-        )
+        return self.router.run(task)
 
     def run_tool(self, tool_name: str, arguments: dict[str, Any]):
         """명시적으로 지정된 툴을 실행합니다. 자연어 매칭을 수행하지 않습니다."""
@@ -128,10 +97,21 @@ class AdaptiveAgent:
 
         tool_name = str(plan.get("tool_name") or "")
         arguments = self._normalized_arguments(plan)
+        state.last_tool_name = tool_name
+        state.last_tool_arguments = dict(arguments)
+        code = arguments.get("code")
+        if isinstance(code, str):
+            state.generated_code = code
         self._record_tool_spec(state, tool_name, arguments)
         result = self.run_tool(tool_name, arguments)
+        state.last_tool_result = {
+            "success": result.success,
+            "output": result.output,
+            "error": result.error,
+        }
         self._record_tool_result(state, tool_name, result.success, result.error)
         if result.success:
+            state.next_node = "critique"
             state.record_event("final_response_created", action="tool")
             return AgentResponse(
                 task=task,
@@ -142,6 +122,8 @@ class AdaptiveAgent:
             )
 
         state.failure_count += 1
+        state.error_log = str(result.error or "")
+        state.reflections.append(f"tool_execution_error:{tool_name}:{result.error}")
         state.record_event("failure_classified", reason="tool_execution_error")
         current_plan = {"action": "tool", "tool_name": tool_name, "arguments": arguments}
         current_error = result.error
@@ -181,11 +163,22 @@ class AdaptiveAgent:
 
             tool_name = str(corrected_plan.get("tool_name") or "")
             arguments = self._normalized_arguments(corrected_plan)
+            state.last_tool_name = tool_name
+            state.last_tool_arguments = dict(arguments)
+            code = arguments.get("code")
+            if isinstance(code, str):
+                state.generated_code = code
             self._record_tool_spec(state, tool_name, arguments)
             state.record_event("tool_reexecuted", tool_name=tool_name, attempt=attempt)
             result = self.run_tool(tool_name, arguments)
+            state.last_tool_result = {
+                "success": result.success,
+                "output": result.output,
+                "error": result.error,
+            }
             self._record_tool_result(state, tool_name, result.success, result.error)
             if result.success:
+                state.next_node = "critique"
                 state.record_event("final_response_created", action="tool")
                 return AgentResponse(
                     task=task,
@@ -195,12 +188,15 @@ class AdaptiveAgent:
                     events=state.events,
                 )
             state.failure_count += 1
+            state.error_log = str(result.error or "")
+            state.reflections.append(f"tool_execution_error:{tool_name}:{result.error}")
             state.record_event("failure_classified", reason="tool_execution_error")
             current_plan = {"action": "tool", "tool_name": tool_name, "arguments": arguments}
             current_error = result.error
             current_output = result.output
 
         state.record_event("final_response_created", action="tool_error")
+        state.next_node = "error"
         return AgentResponse(
             task=task,
             output=f"툴 실행 실패: {current_error}",
@@ -488,6 +484,7 @@ class AdaptiveAgent:
 
     def _build_prompt(self, task: str) -> str:
         """LLM에 전달할 기본 지시문을 구성합니다."""
+
         tools = [
             {
                 "name": tool.name,
@@ -497,31 +494,10 @@ class AdaptiveAgent:
             }
             for tool in self.registry.list()
         ]
-        return (
-            "You are AdaptiveAgent, a tool-using CLI agent. Keep the user's task exactly as "
-            "provided: do not rewrite, trim, translate, change casing, or transform it. Decide "
-            "using the original task only.\n"
-            "Use tools for deterministic work, structured data processing, file operations, "
-            "tests, or calculations. For JSON, CSV, or other structured data, prefer Python code "
-            "through code_execute and use standard parsers such as json or csv. Keep structured "
-            "input as text in the generated code and parse that text with json.loads, csv.DictReader, "
-            "or an equivalent standard parser; do not convert the user's JSON/CSV sample into a "
-            "Python list/dict literal, and do not parse structured data with regular expressions "
-            "or brittle string splitting. Use code_execute for structured data processing; use "
-            "shell_run only when the user explicitly asks to run a shell command, and never for JSON, "
-            "CSV, calculations, or data cleanup. Use analyze_requirements only when the user asks "
-            "about AdaptiveAgent project requirements, never for private user data, databases, "
-            "business analysis, or external resource access. If a task is "
-            "ambiguous, requires missing private credentials/data, or requires user permission, "
-            "Use ask_human instead of guessing. Do not fabricate external data or credentials. "
-            "For one-off deterministic analysis, generate general Python code that solves the "
-            "class of task, not code tailored to a single expected answer.\n"
-            "Return only raw JSON, with no Markdown fences, in one of these forms:\n"
-            '{"action":"tool","tool_name":"<tool name>","arguments":{...}}\n'
-            '{"action":"respond","response":"<answer>","needs_user_input":false}\n'
-            '{"action":"respond","response":"<clarifying question>","needs_user_input":true}\n'
-            f"Available tools: {json.dumps(tools, ensure_ascii=False)}\n"
-            f"Original user task: {task}"
+        return self.prompt_loader.render(
+            "plan.txt",
+            available_tools=json.dumps(tools, ensure_ascii=False),
+            task=task,
         )
 
     def _build_correction_prompt(
@@ -534,18 +510,12 @@ class AdaptiveAgent:
     ) -> str:
         """자가 수정용 프롬프트를 구성합니다."""
 
-        return (
-            "You are AdaptiveAgent repairing a failed tool execution. Keep the original task "
-            "unchanged and fix the general cause of the failure. Do not hard-code only the "
-            "expected answer. If the task involves structured data, keep the structured input as "
-            "text and parse it with standard parsers such as json.loads or csv.DictReader; do not "
-            "replace the input with a Python literal. Return only JSON using the same plan schema "
-            "as before.\n"
-            f"Original user task: {task}\n"
-            f"Failed plan: {json.dumps(failed_plan, ensure_ascii=False)}\n"
-            f"Observed error: {error}\n"
-            f"Observed output: {json.dumps(output, ensure_ascii=False, default=str)}\n"
-            "Return a corrected plan now."
+        return self.prompt_loader.render(
+            "correction.txt",
+            task=task,
+            failed_plan=json.dumps(failed_plan, ensure_ascii=False),
+            error=error,
+            output=json.dumps(output, ensure_ascii=False, default=str),
         )
 
     def _create_state(self) -> AgentState:

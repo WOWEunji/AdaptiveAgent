@@ -6,6 +6,8 @@ import unittest
 
 from adaptive_agent.agent import AdaptiveAgent
 from adaptive_agent.config import AgentConfig
+from adaptive_agent.prompts import PromptLoader
+from adaptive_agent.router import StateMachineRouter
 
 
 class StubLLM:
@@ -105,6 +107,11 @@ class AdaptiveAgentTest(unittest.TestCase):
                 "final_response_created",
             ],
         )
+        self.assertIsInstance(agent.router, StateMachineRouter)
+        self.assertIsNotNone(agent.router.last_state)
+        self.assertEqual(agent.router.last_state.user_task, "사용자 원문")
+        self.assertEqual(agent.router.last_state.current_plan["tool_name"], "echo")
+        self.assertEqual(agent.router.last_state.next_node, "done")
 
     def test_code_tool_plan_records_created_code_event(self) -> None:
         llm = StubLLM(
@@ -135,6 +142,15 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertIn("not code tailored to a single expected answer", prompt)
         self.assertIn("Use ask_human", prompt)
 
+    def test_default_plan_prompt_file_renders_dynamic_context(self) -> None:
+        loader = PromptLoader()
+
+        prompt = loader.render("plan.txt", available_tools="[]", task="원문 유지")
+
+        self.assertIn("You are AdaptiveAgent", prompt)
+        self.assertIn("Available tools: []", prompt)
+        self.assertIn("Original user task: 원문 유지", prompt)
+
     def test_unsupported_clarification_action_is_normalized_to_ask_human(self) -> None:
         llm = StubLLM('{"action":"clarify","response":"어떤 데이터인지 알려주세요."}')
         agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
@@ -164,6 +180,28 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertIn("tool_reexecuted", event_names)
         self.assertIn("fixed", str(result.output))
         self.assertEqual(len(llm.prompts), 2)
+        self.assertIn("repairing a failed tool execution", llm.prompts[1])
+        self.assertIn("Original user task: 코드 실행 오류를 고쳐줘", llm.prompts[1])
+        self.assertIn("Failed plan:", llm.prompts[1])
+        self.assertIn("Observed error:", llm.prompts[1])
+
+    def test_default_correction_prompt_file_renders_failure_context(self) -> None:
+        loader = PromptLoader()
+
+        prompt = loader.render(
+            "correction.txt",
+            task="원본 작업",
+            failed_plan='{"action":"tool"}',
+            error="NameError",
+            output='{"stdout":""}',
+        )
+
+        self.assertIn("Return only JSON using the same plan schema as before", prompt)
+        self.assertIn("Original user task: 원본 작업", prompt)
+        self.assertIn('Failed plan: {"action":"tool"}', prompt)
+        self.assertIn("Observed error: NameError", prompt)
+        self.assertIn('Observed output: {"stdout":""}', prompt)
+
 
     def test_double_encoded_json_plan_is_executed(self) -> None:
         llm = StubLLM(
@@ -287,6 +325,19 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertIn("list_files", tool_names)
         self.assertIn("code_execute", tool_names)
         self.assertIn("ask_human", tool_names)
+
+    def test_agent_state_blueprint_fields_have_defaults(self) -> None:
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM())
+
+        state = agent._create_state()
+
+        self.assertEqual(state.user_task, "")
+        self.assertEqual(state.retrieved_skills, [])
+        self.assertEqual(state.current_plan, {})
+        self.assertEqual(state.generated_code, "")
+        self.assertIsNone(state.last_tool_result)
+        self.assertEqual(state.reflections, [])
+        self.assertEqual(state.next_node, "plan")
 
 
 if __name__ == "__main__":

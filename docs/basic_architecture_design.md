@@ -38,12 +38,16 @@ AdaptiveAgent는 에이전트의 핵심 제어 흐름을 프로젝트 내부 코
 | 영역 | 현재 파일 | 현재 역할 | 다음 설계상 확장 방향 |
 | --- | --- | --- | --- |
 | CLI | `adaptive_agent/cli.py` | 단일 자연어 task, 명시 툴 실행, JSON 출력 | HITL 입력 재요청, 저장 승인 플래그, 실행 이벤트 출력 |
-| Agent core | `adaptive_agent/agent.py` | LLM JSON 계획 수신 후 툴 실행 | ReAct 상태 루프, AgentState, 실패 귀인, self-correction |
+| Agent core | `adaptive_agent/agent.py` | 공개 실행 API와 LLM 계획/정규화 호환 계층 | 세부 노드 로직을 `StateMachineRouter`와 역할별 node로 더 이동 |
+| State router | `adaptive_agent/router.py` | `AgentState.next_node` 기반 실행 전이 경계 | `retrieve -> plan -> code -> execute -> critique -> approve -> store` 루프 확장 |
+| Node contract | `adaptive_agent/nodes/base.py` | Plan/Coder/Critic/Skill Agent 공통 인터페이스와 prompt 위치 규칙 | 역할별 node 구현 및 출력 검증 |
+| Prompt templates | `adaptive_agent/prompts/default/*.txt` | 하드코딩 지시문을 파일 기반 영어 prompt로 관리 | 역할별 prompt set 추가 |
 | Config | `adaptive_agent/config.py` | env/.env 기반 provider와 작업 디렉터리 설정 | 샌드박스 timeout, env allowlist, 레지스트리 경로 정책 |
 | LLM adapters | `adaptive_agent/llms/` | provider별 최소 클라이언트 | provider 차이 격리, 구조화 응답 검증, 오류 메시지 표준화 |
 | Tool model | `adaptive_agent/tools/models.py` | `Tool`, `ToolExecutionResult` | `ToolSchema`, input/output schema, provenance, validation status |
 | Tool registry | `adaptive_agent/tools/registry.py` | 내장 툴 등록과 조회 | 영구 registry 로드, Top-K 검색, 중복 검사 |
 | Tool executor | `adaptive_agent/tools/executor.py` | 등록 툴 실행 | subprocess 격리 실행, timeout, 관찰 로그 |
+| Skill catalog | `adaptive_agent/skills/catalog.py` | `.adaptive_agent/tools/manifest.json` 기반 생성 툴 인덱스 | reflection, embedding 참조, 품질 지표 확장 |
 
 ## 3. 핵심 설계 원칙
 
@@ -75,27 +79,24 @@ CLI
   v
 AdaptiveAgent
   |
-  +-- AgentState / EventLog
-  |
-  +-- Planner --------------------+
-  |                               |
-  |                               v
-  |                         LLMClient adapters
-  |
-  +-- ToolSelector
+  +-- StateMachineRouter
   |     |
-  |     +-- Built-in ToolRegistry
-  |     +-- Persistent ToolRegistry
+  |     +-- AgentState / EventLog / next_node
+  |     +-- Node contracts
+  |           +-- Plan Agent
+  |           +-- Coder Agent
+  |           +-- Critic Agent
+  |           +-- Skill Agent
   |
-  +-- DynamicToolPipeline
-        |
-        +-- ToolSpecGenerator
-        +-- SourceWriter
-        +-- MetadataExtractor
-        +-- SandboxExecutor
-        +-- SelfCorrectionLoop
-        +-- ApprovalWorkflow
-        +-- RegistryWriter
+  +-- PromptLoader
+  |     +-- prompts/default/plan.txt
+  |     +-- prompts/default/correction.txt
+  |
+  +-- Tool layer
+        +-- ToolRegistry / ToolExecutor
+        +-- LocalSandboxBackend
+        +-- SkillCatalog(manifest.json)
+        +-- Built-in and generated tools
 ```
 
 ## 5. 데이터 구조 설계
@@ -132,9 +133,19 @@ LLM이 툴을 정확히 선택하고, 실행기가 입력을 검증하기 위한
 | --- | --- |
 | `history` | Message 목록 |
 | `events` | 관찰 가능한 실행 이벤트 목록 |
+| `user_task` | 보존된 사용자 원문 task |
 | `step_count` | ReAct 루프 반복 횟수 |
 | `available_tools` | 현재 컨텍스트에 주입된 툴 schema 목록 |
 | `candidate_tools` | 저장 후보인 생성 툴 목록 |
+| `retrieved_skills` | 검색된 Top-K 스킬/툴 후보 |
+| `current_plan` | LLM이 반환한 현재 계획 |
+| `generated_code` | 생성 또는 보정된 임시 코드 |
+| `last_tool_name` / `last_tool_arguments` | 마지막 실행 요청의 툴 이름과 인자 |
+| `last_tool_result` | 마지막 툴/샌드박스 실행 결과 |
+| `error_log` | 실패 분석과 self-correction에 넘길 오류 로그 |
+| `reflections` | Critic/Skill Agent가 남기는 교훈과 실패 원인 |
+| `next_node` | 라우터가 다음에 호출할 노드 상태 |
+| `approval` | HITL 승인/거부 대기 상태 |
 | `failure_count` | self-correction 및 실패 중단 판단용 카운터 |
 | `summary` | 오래된 history를 압축한 요약 메모리 |
 
@@ -164,7 +175,7 @@ LLM이 툴을 정확히 선택하고, 실행기가 입력을 검증하기 위한
 
 ### 7.1 생성 전 검색
 
-- `registry.json` 또는 향후 `manifest.json`에서 description, name, parameter 키워드를 대상으로 Top-K 후보를 찾는다.
+- `.adaptive_agent/tools/manifest.json`에서 description, name, parameter 키워드를 대상으로 Top-K 후보를 찾는다.
 - 초기 검색은 의존성이 적은 키워드 점수로 시작한다.
 - 검색 결과가 충분하면 새 툴을 만들지 않고 기존 툴을 실행한다.
 
@@ -195,12 +206,12 @@ LLM이 툴을 정확히 선택하고, 실행기가 입력을 검증하기 위한
 ### 7.6 승인과 영구 등록
 
 - 문제 해결 후 CLI가 "이 툴을 저장할까요? (y/n)" 흐름을 표시한다.
-- `y`: 코드와 metadata를 영구 툴 라이브러리로 이동하고 registry를 갱신한다.
+- `y`: `tool_approve`가 검증된 metadata를 `.adaptive_agent/tools/manifest.json`에 등록한다.
 - `n`: 임시 툴은 재사용 대상에서 제외하고 거부 이벤트를 남긴다.
 
 ## 8. 영구 레지스트리 설계
 
-초기 파일은 `.adaptive_agent/tools/registry.json` 또는 기존 문서의 `.adaptive_agent/tools/manifest.json` 중 하나로 통일해야 한다. 현재 요구사항 문서가 `manifest.json`을 언급하므로, 구현 전 명칭을 하나로 확정한다.
+초기 파일은 `.adaptive_agent/tools/manifest.json`으로 통일한다. 개별 `{tool_name}.json` 메타데이터는 생성·검증 중간 상태로 남길 수 있지만, 검색과 장기 저장의 단일 인덱스는 사용자 승인 후 등록되는 `manifest.json`이다.
 
 권장 최소 필드:
 
@@ -217,7 +228,8 @@ LLM이 툴을 정확히 선택하고, 실행기가 입력을 검증하기 위한
       "created_at": "2026-04-28T00:00:00Z",
       "validation_status": "passed",
       "usage_count": 0,
-      "failure_count": 0
+      "failure_count": 0,
+      "reflections": []
     }
   ]
 }
@@ -236,8 +248,10 @@ LLM이 툴을 정확히 선택하고, 실행기가 입력을 검증하기 위한
 
 ### Phase 1: 상태와 관찰 가능성
 
-- [ ] `Message`, `ToolSchema`, `AgentState`, `AgentEvent` dataclass 추가
-- [ ] Agent 실행 이벤트 기록 구조 추가
+- [x] `Message`, `ToolSchema`, `AgentState`, `AgentEvent` dataclass 추가
+- [x] Agent 실행 이벤트 기록 구조 추가
+- [x] Blueprint 흐름용 `AgentState` 필드(`current_plan`, `generated_code`, `last_tool_result`, `reflections`, `next_node`) 추가
+- [x] `StateMachineRouter` 경계 추가
 - [ ] LLM 계획 JSON 계약을 `use_tool`, `create_tool`, `clarification_requested`, `final_answer`로 확장
 - [ ] `LLMClient` 메서드 명칭을 agent core와 일치하도록 정리
 
@@ -245,7 +259,8 @@ LLM이 툴을 정확히 선택하고, 실행기가 입력을 검증하기 위한
 
 - [ ] `Tool` 모델에 schema, source, validation_status 필드 추가
 - [ ] 내장 툴을 ToolSchema로 직렬화해 LLM prompt에 주입
-- [ ] 영구 registry 파일 포맷 확정
+- [x] 영구 registry 파일 포맷을 `.adaptive_agent/tools/manifest.json`으로 확정
+- [x] `SkillCatalog`로 사용자 승인된 생성 툴 metadata를 manifest에 upsert
 - [ ] Top-K 키워드 검색과 중복 후보 표시 구현
 
 ### Phase 3: 동적 툴 생성과 샌드박스

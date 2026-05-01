@@ -252,6 +252,16 @@ def create_default_registry(
     )
     registry.register(
         Tool(
+            name="tool_approve",
+            description="사용자 승인 후 검증된 생성 도구를 manifest 스킬 카탈로그에 등록합니다.",
+            handler=lambda arguments: builtins.tool_approve(arguments, tool_library=tool_library),
+            category="tool_library",
+            safety_level="high",
+            usage="python3 -m adaptive_agent --json --tool tool_approve --arg name=my_tool",
+        )
+    )
+    registry.register(
+        Tool(
             name="memory_read",
             description="에이전트 로컬 메모리 값을 읽습니다.",
             handler=lambda arguments: builtins.memory_read(arguments, memory_dir=memory_dir),

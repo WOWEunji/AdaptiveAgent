@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from adaptive_agent.skills import MANIFEST_FILENAME, SkillCatalog
 from adaptive_agent.tools.models import ToolExecutionResult
 from adaptive_agent.tools.sandbox import LocalSandboxBackend, SandboxPolicyViolation
 
@@ -289,7 +290,9 @@ def tool_create(arguments: dict[str, object], *, tool_library: Path) -> ToolExec
         "name": name,
         "description": description,
         "path": str(code_path),
+        "file_path": str(code_path),
         "status": "created_unloaded",
+        "validation_status": "created_unloaded",
     }
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     return ToolExecutionResult(success=True, output=metadata)
@@ -339,10 +342,32 @@ def tool_validate(
     if result.success:
         metadata_path = tool_library / f"{name}.json"
         metadata = _read_json_object(metadata_path)
-        metadata.update({"status": "validated", "validated": True})
+        metadata.update({"status": "validated", "validated": True, "validation_status": "passed"})
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         result.output["tool"] = metadata
     return result
+
+
+def tool_approve(arguments: dict[str, object], *, tool_library: Path) -> ToolExecutionResult:
+    """사용자 승인 후 검증된 생성 툴을 manifest catalog에 등록합니다."""
+
+    name = str(arguments.get("name") or "")
+    if not _SAFE_NAME_PATTERN.match(name):
+        return ToolExecutionResult(success=False, output="", error="name은 영문/숫자/밑줄 2~64자여야 합니다.")
+
+    metadata_path = tool_library / f"{name}.json"
+    code_path = tool_library / f"{name}.py"
+    if not metadata_path.exists() or not code_path.exists():
+        return ToolExecutionResult(success=False, output="", error=f"승인할 생성 툴을 찾을 수 없습니다: {name}")
+
+    metadata = _read_json_object(metadata_path)
+    if metadata.get("validation_status") != "passed":
+        return ToolExecutionResult(success=False, output=metadata, error="검증을 통과한 툴만 승인 등록할 수 있습니다.")
+
+    metadata.update({"status": "approved", "approved": True, "approval_status": "approved"})
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    catalog_metadata = SkillCatalog(tool_library).upsert(metadata)
+    return ToolExecutionResult(success=True, output={"tool": metadata, "catalog": catalog_metadata})
 
 
 def tool_search(
@@ -539,19 +564,7 @@ def _unified_diff_preview(before: str, after: str, path: str) -> str:
 
 
 def _load_generated_tool_metadata(tool_library: Path) -> list[dict[str, Any]]:
-    if not tool_library.exists():
-        return []
-    tools: list[dict[str, Any]] = []
-    for metadata_path in sorted(tool_library.glob("*.json")):
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(metadata, dict):
-            metadata.setdefault("category", "generated")
-            metadata.setdefault("safety_level", "unknown")
-            tools.append(metadata)
-    return tools
+    return SkillCatalog(tool_library).list()
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
