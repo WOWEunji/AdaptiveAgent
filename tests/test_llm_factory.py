@@ -50,6 +50,8 @@ class LLMFactoryTest(unittest.TestCase):
         ollama_client.chat.assert_called_once_with(
             model="qwen-test",
             messages=[{"role": "user", "content": "hello"}],
+            format="json",
+            options={"temperature": 0},
         )
 
 
