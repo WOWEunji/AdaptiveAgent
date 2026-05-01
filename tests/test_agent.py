@@ -20,6 +20,20 @@ class StubLLM:
         return self.response
 
 
+class SequenceLLM:
+    """호출 순서대로 응답을 반환하는 테스트용 LLM 클라이언트."""
+
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.prompts: list[str] = []
+
+    def complete(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        if not self.responses:
+            return '{"action":"respond","response":"응답 없음"}'
+        return self.responses.pop(0)
+
+
 class FailingLLM:
     """테스트용 실패 LLM 클라이언트."""
 
@@ -116,6 +130,50 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertIn("Use tools for deterministic work", prompt)
         self.assertIn("standard parsers such as json or csv", prompt)
         self.assertIn("not code tailored to a single expected answer", prompt)
+        self.assertIn("Use ask_human", prompt)
+
+    def test_unsupported_clarification_action_is_normalized_to_ask_human(self) -> None:
+        llm = StubLLM('{"action":"clarify","response":"어떤 데이터인지 알려주세요."}')
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+
+        result = agent.run("데이터 정리해줘")
+
+        event_names = [event.name for event in result.events]
+        self.assertEqual(result.action, "tool")
+        self.assertEqual(result.tool_name, "ask_human")
+        self.assertIn("clarification_requested", event_names)
+        self.assertIn("pending_human_input", str(result.output))
+
+    def test_tool_error_can_self_correct_and_reexecute(self) -> None:
+        llm = SequenceLLM(
+            [
+                '{"action":"tool","tool_name":"code_execute","arguments":{"code":"print(missing_name)"}}',
+                '{"action":"tool","tool_name":"code_execute","arguments":{"code":"print(\\"fixed\\")"}}',
+            ]
+        )
+        agent = AdaptiveAgent(config=AgentConfig(max_self_corrections=1), llm_client=llm)
+
+        result = agent.run("코드 실행 오류를 고쳐줘")
+
+        event_names = [event.name for event in result.events]
+        self.assertEqual(result.action, "tool")
+        self.assertIn("self_correction_started", event_names)
+        self.assertIn("tool_reexecuted", event_names)
+        self.assertIn("fixed", str(result.output))
+        self.assertEqual(len(llm.prompts), 2)
+
+    def test_double_encoded_json_plan_is_executed(self) -> None:
+        llm = StubLLM(
+            '"{\\"action\\":\\"tool\\",\\"tool_name\\":\\"echo\\",'
+            '\\"arguments\\":{\\"task\\":\\"decoded\\"}}"'
+        )
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+
+        result = agent.run("이중 인코딩된 계획")
+
+        self.assertEqual(result.action, "tool")
+        self.assertEqual(result.tool_name, "echo")
+        self.assertEqual(result.output, "decoded")
 
     def test_tool_plan_without_tool_name_is_rejected(self) -> None:
         llm = StubLLM('{"action":"tool","arguments":{"task":"원문 그대로"}}')

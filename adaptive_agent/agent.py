@@ -26,6 +26,18 @@ class AgentResponse:
 
 
 _VALID_PLAN_ACTIONS = {"tool", "respond"}
+_CLARIFICATION_ACTIONS = {
+    "ask",
+    "ask_human",
+    "ask_user",
+    "ask_user_input",
+    "clarification",
+    "clarify",
+    "input_required",
+    "request_clarification",
+    "request_input",
+    "request_user_input",
+}
 
 
 class AdaptiveAgent:
@@ -84,50 +96,12 @@ class AdaptiveAgent:
         if validation_error:
             state.record_event("plan_validation_failed", reason=validation_error)
         state.record_event("task_analyzed", action=plan.get("action", "respond"))
-        if plan.get("action") == "tool":
-            tool_name = str(plan.get("tool_name") or "")
-            arguments = plan.get("arguments")
-            if not isinstance(arguments, dict):
-                arguments = {}
-            state.record_event(
-                "tool_spec_created",
-                tool_name=tool_name,
-                argument_keys=sorted(str(key) for key in arguments),
-            )
-            code = arguments.get("code")
-            if isinstance(code, str) and code:
-                state.record_event("tool_code_created", tool_name=tool_name, code=code)
-            if tool_name == "ask_human":
-                state.record_event("clarification_requested", reason="llm_requested_human_input")
-            state.record_event("tool_execution_requested", tool_name=tool_name)
-            result = self.run_tool(tool_name, arguments)
-            state.record_event("tool_executed", tool_name=tool_name, success=result.success)
-            state.record_event(
-                "tool_result_observed",
-                tool_name=tool_name,
-                success=result.success,
-                has_error=result.error is not None,
-            )
-            if result.success:
-                state.record_event("final_response_created", action="tool")
-                return AgentResponse(
-                    task=task,
-                    output=result.output,
-                    tool_name=tool_name,
-                    action="tool",
-                    events=state.events,
-                )
-            state.failure_count += 1
-            state.record_event("failure_classified", reason="tool_execution_error")
-            state.record_event("final_response_created", action="tool_error")
-            return AgentResponse(
-                task=task,
-                output=f"툴 실행 실패: {result.error}",
-                tool_name=tool_name,
-                action="tool_error",
-                events=state.events,
-            )
+        response = self._run_normalized_plan(task, plan, state)
+        if response is not None:
+            return response
 
+        if plan.get("needs_user_input"):
+            state.record_event("clarification_requested", reason="llm_requested_user_input")
         state.record_event("final_response_created", action="llm")
         return AgentResponse(
             task=task,
@@ -141,16 +115,179 @@ class AdaptiveAgent:
 
         return self.executor.run(tool_name, arguments)
 
+    def _run_normalized_plan(
+        self,
+        task: str,
+        plan: dict[str, Any],
+        state: AgentState,
+    ) -> AgentResponse | None:
+        """정규화된 LLM 계획을 실행하고 필요하면 제한된 self-correction을 수행합니다."""
+
+        if plan.get("action") != "tool":
+            return None
+
+        tool_name = str(plan.get("tool_name") or "")
+        arguments = self._normalized_arguments(plan)
+        self._record_tool_spec(state, tool_name, arguments)
+        result = self.run_tool(tool_name, arguments)
+        self._record_tool_result(state, tool_name, result.success, result.error)
+        if result.success:
+            state.record_event("final_response_created", action="tool")
+            return AgentResponse(
+                task=task,
+                output=result.output,
+                tool_name=tool_name,
+                action="tool",
+                events=state.events,
+            )
+
+        state.failure_count += 1
+        state.record_event("failure_classified", reason="tool_execution_error")
+        current_plan = {"action": "tool", "tool_name": tool_name, "arguments": arguments}
+        current_error = result.error
+        current_output = result.output
+        for attempt in range(1, self.config.max_self_corrections + 1):
+            state.record_event(
+                "self_correction_started",
+                attempt=attempt,
+                tool_name=tool_name,
+                error=current_error,
+            )
+            try:
+                corrected_plan = self._plan_correction_with_llm(
+                    task,
+                    current_plan,
+                    error=current_error,
+                    output=current_output,
+                )
+            except Exception as exc:
+                state.record_event("failure_classified", reason="external_provider_error")
+                current_error = f"LLM self-correction failed: {exc}"
+                break
+
+            validation_error = corrected_plan.pop("_validation_error", None)
+            if validation_error:
+                state.record_event("plan_validation_failed", reason=validation_error)
+            if corrected_plan.get("action") != "tool":
+                if corrected_plan.get("needs_user_input"):
+                    state.record_event("clarification_requested", reason="self_correction_requested_user_input")
+                state.record_event("final_response_created", action="llm")
+                return AgentResponse(
+                    task=task,
+                    output=corrected_plan.get("response", ""),
+                    action="llm",
+                    events=state.events,
+                )
+
+            tool_name = str(corrected_plan.get("tool_name") or "")
+            arguments = self._normalized_arguments(corrected_plan)
+            self._record_tool_spec(state, tool_name, arguments)
+            state.record_event("tool_reexecuted", tool_name=tool_name, attempt=attempt)
+            result = self.run_tool(tool_name, arguments)
+            self._record_tool_result(state, tool_name, result.success, result.error)
+            if result.success:
+                state.record_event("final_response_created", action="tool")
+                return AgentResponse(
+                    task=task,
+                    output=result.output,
+                    tool_name=tool_name,
+                    action="tool",
+                    events=state.events,
+                )
+            state.failure_count += 1
+            state.record_event("failure_classified", reason="tool_execution_error")
+            current_plan = {"action": "tool", "tool_name": tool_name, "arguments": arguments}
+            current_error = result.error
+            current_output = result.output
+
+        state.record_event("final_response_created", action="tool_error")
+        return AgentResponse(
+            task=task,
+            output=f"툴 실행 실패: {current_error}",
+            tool_name=tool_name,
+            action="tool_error",
+            events=state.events,
+        )
+
+    def _normalized_arguments(self, plan: dict[str, Any]) -> dict[str, Any]:
+        arguments = plan.get("arguments")
+        return arguments if isinstance(arguments, dict) else {}
+
+    def _record_tool_spec(self, state: AgentState, tool_name: str, arguments: dict[str, Any]) -> None:
+        state.record_event(
+            "tool_spec_created",
+            tool_name=tool_name,
+            argument_keys=sorted(str(key) for key in arguments),
+        )
+        code = arguments.get("code")
+        if isinstance(code, str) and code:
+            state.record_event("tool_code_created", tool_name=tool_name, code=code)
+        if tool_name == "ask_human":
+            state.record_event("clarification_requested", reason="llm_requested_human_input")
+        state.record_event("tool_execution_requested", tool_name=tool_name)
+
+    def _record_tool_result(
+        self,
+        state: AgentState,
+        tool_name: str,
+        success: bool,
+        error: str | None,
+    ) -> None:
+        state.record_event("tool_executed", tool_name=tool_name, success=success)
+        state.record_event(
+            "tool_result_observed",
+            tool_name=tool_name,
+            success=success,
+            has_error=error is not None,
+        )
+
     def _plan_with_llm(self, task: str) -> dict[str, Any]:
         """LLM에게 원문 task와 툴 목록을 전달해 실행 계획을 받습니다."""
 
         response = self.llm_client.complete(self._build_prompt(task))
-        try:
-            parsed = json.loads(response)
-        except json.JSONDecodeError:
-            return {"action": "respond", "response": response}
+        parsed = self._loads_plan_json(response)
 
         return self._normalize_plan(parsed, fallback_response=response)
+
+    def _plan_correction_with_llm(
+        self,
+        task: str,
+        failed_plan: dict[str, Any],
+        *,
+        error: str | None,
+        output: Any,
+    ) -> dict[str, Any]:
+        """실패한 툴 실행 관찰을 바탕으로 수정 계획을 요청합니다."""
+
+        response = self.llm_client.complete(
+            self._build_correction_prompt(
+                task,
+                failed_plan,
+                error=error,
+                output=output,
+            )
+        )
+        try:
+            parsed = self._loads_plan_json(response)
+        except json.JSONDecodeError:
+            parsed = response
+        return self._normalize_plan(parsed, fallback_response=response)
+
+    def _loads_plan_json(self, response: str) -> object:
+        """LLM이 JSON 계획을 문자열로 한 번 더 감싸 반환해도 계획 객체로 복원합니다."""
+
+        try:
+            parsed: object = json.loads(response)
+        except json.JSONDecodeError:
+            return response
+        if isinstance(parsed, str):
+            stripped = parsed.strip()
+            if stripped.startswith("{") and stripped.endswith("}"):
+                try:
+                    return json.loads(stripped)
+                except json.JSONDecodeError:
+                    return parsed
+        return parsed
 
     def _normalize_plan(self, parsed: object, *, fallback_response: str) -> dict[str, Any]:
         """LLM 계획 JSON을 Agent가 실행 가능한 최소 계약으로 정규화합니다."""
@@ -163,11 +300,16 @@ class AdaptiveAgent:
             }
 
         raw_action = parsed.get("action")
+        if isinstance(raw_action, str) and self._is_clarification_action(raw_action):
+            response = self._clarification_text(parsed, fallback_response)
+            return self._ask_human_plan(response)
+
         if raw_action not in _VALID_PLAN_ACTIONS:
             return {
                 "action": "respond",
                 "response": str(parsed.get("response") or fallback_response),
                 "_validation_error": "unsupported_action",
+                "needs_user_input": bool(parsed.get("needs_user_input")),
             }
 
         if raw_action == "respond":
@@ -178,7 +320,13 @@ class AdaptiveAgent:
                     "response": fallback_response,
                     "_validation_error": "invalid_response",
                 }
-            return {"action": "respond", "response": response}
+            if bool(parsed.get("needs_user_input")):
+                return self._ask_human_plan(response)
+            return {
+                "action": "respond",
+                "response": response,
+                "needs_user_input": bool(parsed.get("needs_user_input")),
+            }
 
         tool_name = parsed.get("tool_name")
         if not isinstance(tool_name, str) or tool_name == "":
@@ -196,6 +344,31 @@ class AdaptiveAgent:
                 "_validation_error": "invalid_tool_arguments",
             }
         return {"action": "tool", "tool_name": tool_name, "arguments": arguments}
+
+    def _is_clarification_action(self, raw_action: str) -> bool:
+        normalized = raw_action.strip().lower().replace("-", "_").replace(" ", "_")
+        return normalized in _CLARIFICATION_ACTIONS or any(
+            token in normalized for token in ("ask", "clarif", "input")
+        )
+
+    def _clarification_text(self, parsed: dict[str, Any], fallback_response: str) -> str:
+        response = parsed.get("response")
+        if isinstance(response, str):
+            return response
+        question = parsed.get("question")
+        if isinstance(question, str):
+            return question
+        questions = parsed.get("questions")
+        if isinstance(questions, list):
+            return "\n".join(str(item) for item in questions)
+        return fallback_response
+
+    def _ask_human_plan(self, question: str) -> dict[str, Any]:
+        return {
+            "action": "tool",
+            "tool_name": "ask_human",
+            "arguments": {"questions": question},
+        }
 
     def _build_prompt(self, task: str) -> str:
         """LLM에 전달할 기본 지시문을 구성합니다."""
@@ -217,14 +390,37 @@ class AdaptiveAgent:
             "through code_execute and use standard parsers such as json or csv; do not parse "
             "structured data with regular expressions or brittle string splitting. If a task is "
             "ambiguous, requires missing private credentials/data, or requires user permission, "
-            "call ask_human instead of guessing. Do not fabricate external data or credentials. "
+            "Use ask_human instead of guessing. Do not fabricate external data or credentials. "
             "For one-off deterministic analysis, generate general Python code that solves the "
             "class of task, not code tailored to a single expected answer.\n"
             "Return only JSON in one of these forms:\n"
             '{"action":"tool","tool_name":"<tool name>","arguments":{...}}\n'
-            '{"action":"respond","response":"<answer>"}\n'
+            '{"action":"respond","response":"<answer>","needs_user_input":false}\n'
+            '{"action":"respond","response":"<clarifying question>","needs_user_input":true}\n'
             f"Available tools: {json.dumps(tools, ensure_ascii=False)}\n"
             f"Original user task: {task}"
+        )
+
+    def _build_correction_prompt(
+        self,
+        task: str,
+        failed_plan: dict[str, Any],
+        *,
+        error: str | None,
+        output: Any,
+    ) -> str:
+        """자가 수정용 프롬프트를 구성합니다."""
+
+        return (
+            "You are AdaptiveAgent repairing a failed tool execution. Keep the original task "
+            "unchanged and fix the general cause of the failure. Do not hard-code only the "
+            "expected answer. If the task involves structured data, keep using standard parsers "
+            "such as json or csv. Return only JSON using the same plan schema as before.\n"
+            f"Original user task: {task}\n"
+            f"Failed plan: {json.dumps(failed_plan, ensure_ascii=False)}\n"
+            f"Observed error: {error}\n"
+            f"Observed output: {json.dumps(output, ensure_ascii=False, default=str)}\n"
+            "Return a corrected plan now."
         )
 
     def _create_state(self) -> AgentState:
