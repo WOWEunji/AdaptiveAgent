@@ -20,7 +20,7 @@ class AgentConfig:
     """에이전트 실행에 필요한 설정값을 담습니다."""
 
     llm_provider: str = "ollama"
-    ollama_model: str = "qwen2.5:1.5b"
+    ollama_model: str = "qwen3.5:2b"
     ollama_host: str | None = None
     openai_model: str = "gpt-5-nano"
     gemini_model: str = "gemini-2.5-flash-lite"
@@ -56,7 +56,7 @@ class AgentConfig:
         return cls(
             llm_provider=llm_provider
             or os.getenv("ADAPTIVE_AGENT_LLM", os.getenv("LLM_PROVIDER", "ollama")),
-            ollama_model=os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b"),
+            ollama_model=os.getenv("OLLAMA_MODEL", "qwen3.5:2b"),
             ollama_host=os.getenv("OLLAMA_HOST") or None,
             openai_model=os.getenv("OPENAI_MODEL", "gpt-5-nano"),
             gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),

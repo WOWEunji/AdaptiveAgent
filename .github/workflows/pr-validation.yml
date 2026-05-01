@@ -123,7 +123,7 @@ jobs:
           done
           model="$INPUT_LLM_MODEL"
           if [ -z "$model" ]; then
-            model="qwen2.5:1.5b"
+            model="qwen3.5:2b"
           fi
           ollama pull "$model"
           echo "OLLAMA_MODEL=$model" >> "$GITHUB_ENV"

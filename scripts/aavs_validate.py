@@ -231,7 +231,7 @@ def main() -> int:
 def default_model(provider: str, env: dict[str, str]) -> str:
     if provider == "openai":
         return env.get("OPENAI_MODEL", "gpt-5-nano")
-    return env.get("OLLAMA_MODEL", "qwen2.5:1.5b")
+    return env.get("OLLAMA_MODEL", "qwen3.5:2b")
 
 
 def run_scenario(
