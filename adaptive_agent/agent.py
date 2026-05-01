@@ -300,16 +300,32 @@ class AdaptiveAgent:
     def _extract_json_object(self, text: str) -> str:
         """응답 주변에 따옴표나 설명이 붙은 경우 첫 JSON object 후보를 추출합니다."""
 
+        text = self._strip_markdown_code_fence(text)
         start = text.find("{")
         end = text.rfind("}")
         if start == -1 or end == -1 or end <= start:
             return text
         return text[start : end + 1]
 
+    def _strip_markdown_code_fence(self, text: str) -> str:
+        """작은 로컬 모델이 자주 붙이는 ```json fence를 제거합니다."""
+
+        stripped = text.strip()
+        if not stripped.startswith("```"):
+            return text
+        lines = stripped.splitlines()
+        if len(lines) >= 2 and lines[0].startswith("```"):
+            if lines[-1].strip() == "```":
+                return "\n".join(lines[1:-1]).strip()
+            return "\n".join(lines[1:]).strip()
+        return text
+
     def _normalize_plan(self, parsed: object, *, fallback_response: str) -> dict[str, Any]:
         """LLM 계획 JSON을 Agent가 실행 가능한 최소 계약으로 정규화합니다."""
 
         if not isinstance(parsed, dict):
+            if isinstance(parsed, str) and self._looks_like_clarification_response(parsed):
+                return self._ask_human_plan(parsed)
             return {
                 "action": "respond",
                 "response": fallback_response,
@@ -361,6 +377,8 @@ class AdaptiveAgent:
                 if embedded_action in _VALID_PLAN_ACTIONS or isinstance(embedded_plan.get("tool_name"), str):
                     return self._normalize_plan(embedded_plan, fallback_response=fallback_response)
             if bool(parsed.get("needs_user_input")):
+                return self._ask_human_plan(response)
+            if self._looks_like_clarification_response(response):
                 return self._ask_human_plan(response)
             return {
                 "action": "respond",
@@ -427,6 +445,28 @@ class AdaptiveAgent:
             token in normalized for token in ("ask", "clarif", "input")
         )
 
+    def _looks_like_clarification_response(self, response: str) -> bool:
+        """LLM이 계획 대신 직접 추가정보 요청 문장을 낸 경우 HITL로 정규화합니다."""
+
+        normalized = response.casefold()
+        clarification_markers = (
+            "please provide",
+            "provide more",
+            "provide more details",
+            "more details",
+            "more detail",
+            "need access",
+            "need credentials",
+            "missing",
+            "which data",
+            "what data",
+            "clarify",
+            "추가 정보",
+            "알려주세요",
+            "제공",
+        )
+        return any(marker in normalized for marker in clarification_markers)
+
     def _clarification_text(self, parsed: dict[str, Any], fallback_response: str) -> str:
         response = parsed.get("response")
         if isinstance(response, str):
@@ -467,12 +507,16 @@ class AdaptiveAgent:
             "input as text in the generated code and parse that text with json.loads, csv.DictReader, "
             "or an equivalent standard parser; do not convert the user's JSON/CSV sample into a "
             "Python list/dict literal, and do not parse structured data with regular expressions "
-            "or brittle string splitting. If a task is "
+            "or brittle string splitting. Use code_execute for structured data processing; use "
+            "shell_run only when the user explicitly asks to run a shell command, and never for JSON, "
+            "CSV, calculations, or data cleanup. Use analyze_requirements only when the user asks "
+            "about AdaptiveAgent project requirements, never for private user data, databases, "
+            "business analysis, or external resource access. If a task is "
             "ambiguous, requires missing private credentials/data, or requires user permission, "
             "Use ask_human instead of guessing. Do not fabricate external data or credentials. "
             "For one-off deterministic analysis, generate general Python code that solves the "
             "class of task, not code tailored to a single expected answer.\n"
-            "Return only JSON in one of these forms:\n"
+            "Return only raw JSON, with no Markdown fences, in one of these forms:\n"
             '{"action":"tool","tool_name":"<tool name>","arguments":{...}}\n'
             '{"action":"respond","response":"<answer>","needs_user_input":false}\n'
             '{"action":"respond","response":"<clarifying question>","needs_user_input":true}\n'

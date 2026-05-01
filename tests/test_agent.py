@@ -130,6 +130,8 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertIn("Use tools for deterministic work", prompt)
         self.assertIn("standard parsers such as json or csv", prompt)
         self.assertIn("Keep structured input as text", prompt)
+        self.assertIn("never for JSON, CSV, calculations, or data cleanup", prompt)
+        self.assertIn("Use analyze_requirements only", prompt)
         self.assertIn("not code tailored to a single expected answer", prompt)
         self.assertIn("Use ask_human", prompt)
 
@@ -188,6 +190,30 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertEqual(result.action, "tool")
         self.assertEqual(result.tool_name, "echo")
         self.assertEqual(result.output, "nested")
+
+    def test_markdown_fenced_json_plan_is_executed(self) -> None:
+        llm = StubLLM(
+            "```json\n"
+            '{"action":"tool","tool_name":"echo","arguments":{"task":"fenced"}}'
+            "\n```"
+        )
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+
+        result = agent.run("마크다운 코드블록 계획")
+
+        self.assertEqual(result.action, "tool")
+        self.assertEqual(result.tool_name, "echo")
+        self.assertEqual(result.output, "fenced")
+
+    def test_direct_clarification_text_is_normalized_to_ask_human(self) -> None:
+        llm = StubLLM("Please provide more details about the cleanup process.")
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+
+        result = agent.run("데이터 정리해줘")
+
+        self.assertEqual(result.action, "tool")
+        self.assertEqual(result.tool_name, "ask_human")
+        self.assertIn("pending_human_input", str(result.output))
 
     def test_tool_name_action_and_arg_aliases_are_normalized(self) -> None:
         llm = StubLLM(
