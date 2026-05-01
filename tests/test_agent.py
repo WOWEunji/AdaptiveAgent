@@ -175,6 +175,33 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertEqual(result.tool_name, "echo")
         self.assertEqual(result.output, "decoded")
 
+    def test_json_plan_inside_response_field_is_executed(self) -> None:
+        llm = StubLLM(
+            '{"action":"respond","response":"{\\"action\\":\\"tool\\",'
+            '\\"tool_name\\":\\"echo\\",\\"arguments\\":{\\"task\\":\\"nested\\"}}"}'
+        )
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+
+        result = agent.run("응답 필드에 들어간 계획")
+
+        self.assertEqual(result.action, "tool")
+        self.assertEqual(result.tool_name, "echo")
+        self.assertEqual(result.output, "nested")
+
+    def test_tool_name_action_and_arg_aliases_are_normalized(self) -> None:
+        llm = StubLLM(
+            '{"action":"code_execute","arguments":{'
+            '"code":"import sys\\nprint(sys.stdin.read())",'
+            '"arg_input":"alias input","arg_lang":"python"}}'
+        )
+        agent = AdaptiveAgent(config=AgentConfig(max_self_corrections=0), llm_client=llm)
+
+        result = agent.run("비표준 툴 계획")
+
+        self.assertEqual(result.action, "tool")
+        self.assertEqual(result.tool_name, "code_execute")
+        self.assertIn("alias input", str(result.output))
+
     def test_tool_plan_without_tool_name_is_rejected(self) -> None:
         llm = StubLLM('{"action":"tool","arguments":{"task":"원문 그대로"}}')
         agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
