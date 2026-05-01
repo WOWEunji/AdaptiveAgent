@@ -8,16 +8,16 @@ from pathlib import Path
 
 try:
     from dotenv import load_dotenv
-except ImportError:  # pragma: no cover - dependency가 설치되면 실제 구현을 사용합니다.
+except ImportError:  # pragma: no cover - optional dependency fallback
     def load_dotenv(*_args: object, **_kwargs: object) -> bool:
-        """python-dotenv 미설치 환경에서 설정 로드를 건너뜁니다."""
+        """No-op dotenv loader for environments without python-dotenv."""
 
         return False
 
 
 @dataclass(frozen=True)
 class AgentConfig:
-    """에이전트 실행에 필요한 설정값을 담습니다."""
+    """Runtime settings for AdaptiveAgent execution."""
 
     llm_provider: str = "ollama"
     ollama_model: str = "qwen3.5:2b"
@@ -39,10 +39,10 @@ class AgentConfig:
         llm_provider: str | None = None,
         language: str | None = None,
     ) -> "AgentConfig":
-        """환경 변수와 .env 파일에서 설정을 로드합니다."""
+        """Load runtime settings from environment variables and .env."""
 
         if env_file:
-            # 기본값은 환경 변수가 이미 있으면 .env를 무시한다. 로컬 `.env`가 의도한 설정이 되도록 덮어쓴다.
+            # Local .env values should override inherited shell defaults.
             load_dotenv(env_file, override=True)
 
         workspace_dir = Path(os.getenv("ADAPTIVE_AGENT_WORKSPACE", Path.cwd())).resolve()

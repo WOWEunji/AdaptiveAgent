@@ -8,12 +8,12 @@ from adaptive_agent.llms.base import LLMClient
 
 
 def should_use_openai_responses_api(model: str) -> bool:
-    """gpt-5 계열 등은 Responses API 사용이 기본인 경우가 많다."""
+    """Return whether the model should use the OpenAI Responses API."""
     return model.lower().startswith("gpt-5")
 
 
 def validate_openai_api_key(key: str | None) -> str:
-    """로컬 스모크 테스트용: 비어 있거나 예시 문구면 즉시 실패."""
+    """Validate configured OpenAI API key material."""
     if not key or not (k := key.strip()):
         msg = "OPENAI_API_KEY가 설정되어 있지 않습니다."
         raise ValueError(msg)
@@ -37,12 +37,12 @@ def validate_openai_api_key(key: str | None) -> str:
         raise ValueError(msg)
     if k.startswith("sk-"):
         return k
-    # 비표준 포맷은 경고 없이 통과(호환 키 형식 대비)
+    # Preserve compatibility with non-standard OpenAI-compatible key formats.
     return k
 
 
 def format_openai_api_error(*, status_code: int | None, message: str, model: str) -> str | None:
-    """OpenAI SDK 오류를 사용자가 바로 조치할 수 있는 메시지로 바꿉니다."""
+    """Format actionable OpenAI SDK errors for CLI output."""
 
     if status_code == 401:
         return (
@@ -74,7 +74,7 @@ def _extract_openai_error_message(exc: Exception) -> str:
 
 
 class OpenAIClient:
-    """OpenAI `chat.completions` 또는 `responses` 기반 최소 클라이언트."""
+    """Minimal OpenAI client for Chat Completions and Responses APIs."""
 
     def __init__(self, model: str, *, api_key: str | None = None) -> None:
         self._model = model
@@ -121,7 +121,7 @@ class OpenAIClient:
             raise
 
     def complete(self, prompt: str) -> str:
-        """Agent core가 사용하는 표준 completion 인터페이스입니다."""
+        """Compatibility completion method used by the agent core."""
 
         return self.generate(prompt)
 

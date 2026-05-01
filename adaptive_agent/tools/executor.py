@@ -1,4 +1,4 @@
-"""등록된 툴을 표준화된 방식으로 실행합니다."""
+"""Standard execution boundary for registered tools."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ from adaptive_agent.tools.registry import ToolRegistry
 
 
 class ToolExecutor:
-    """ToolRegistry에 등록된 툴을 실행합니다."""
+    """Executor for tools stored in ToolRegistry."""
 
     def __init__(self, registry: ToolRegistry) -> None:
         self.registry = registry
 
     def run(self, tool_name: str, arguments: dict[str, Any]) -> ToolExecutionResult:
-        """툴 이름과 인자를 받아 실행 결과를 반환합니다."""
+        """Run a registered tool by name with structured arguments."""
 
         tool = self.registry.get(tool_name)
         if tool is None:
@@ -23,5 +23,5 @@ class ToolExecutor:
 
         try:
             return tool.handler(arguments)
-        except Exception as exc:  # pragma: no cover - 안전망
+        except Exception as exc:  # pragma: no cover - execution boundary guard
             return ToolExecutionResult(success=False, output="", error=str(exc))

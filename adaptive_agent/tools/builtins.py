@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from adaptive_agent.skills import MANIFEST_FILENAME, SkillCatalog
 from adaptive_agent.tools.models import ToolExecutionResult
 from adaptive_agent.tools.sandbox import LocalSandboxBackend, SandboxPolicyViolation
 
@@ -20,7 +21,7 @@ _BLOCKED_FILENAMES = {".env"}
 
 
 def code_execute(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> ToolExecutionResult:
-    """코드를 별도 프로세스의 임시 작업공간에서 실행하고 판정 정보를 반환합니다."""
+    """Execute Python code in an isolated temporary workspace."""
 
     code = str(arguments.get("code") or "")
     lang = str(arguments.get("lang") or "python").lower()
@@ -42,7 +43,7 @@ def code_execute(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) 
 
 
 def shell_run(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> ToolExecutionResult:
-    """셸 명령을 별도 프로세스의 임시 작업공간에서 실행하고 판정 정보를 반환합니다."""
+    """Execute shell code in an isolated temporary workspace."""
 
     code = str(arguments.get("code") or arguments.get("command") or "")
     lang = str(arguments.get("lang") or "bash").lower()
@@ -65,7 +66,7 @@ def shell_run(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> 
 
 
 def file_read(arguments: dict[str, object], *, workspace: Path) -> ToolExecutionResult:
-    """워크스페이스 내부 파일을 UTF-8 텍스트로 읽습니다."""
+    """Read a UTF-8 text file inside the workspace."""
 
     raw_path = str(arguments.get("path") or "")
     resolved = _resolve_workspace_path(workspace, raw_path)
@@ -88,7 +89,7 @@ def file_read(arguments: dict[str, object], *, workspace: Path) -> ToolExecution
 
 
 def file_write(arguments: dict[str, object], *, workspace: Path) -> ToolExecutionResult:
-    """워크스페이스 내부 파일에 UTF-8 텍스트를 씁니다."""
+    """Write UTF-8 text to a file inside the workspace."""
 
     raw_path = str(arguments.get("path") or "")
     content = arguments.get("content", arguments.get("context"))
@@ -121,7 +122,7 @@ def file_write(arguments: dict[str, object], *, workspace: Path) -> ToolExecutio
 
 
 def file_list(arguments: dict[str, object], *, workspace: Path) -> ToolExecutionResult:
-    """워크스페이스 내부 파일/디렉터리를 구조화된 목록으로 반환합니다."""
+    """Return structured file entries inside the workspace."""
 
     raw_path = str(arguments.get("path") or ".")
     pattern = str(arguments.get("pattern") or "*")
@@ -156,7 +157,7 @@ def file_list(arguments: dict[str, object], *, workspace: Path) -> ToolExecution
 
 
 def file_patch(arguments: dict[str, object], *, workspace: Path) -> ToolExecutionResult:
-    """단일 UTF-8 텍스트 파일에서 old_text를 new_text로 치환합니다."""
+    """Replace text in one UTF-8 workspace file."""
 
     raw_path = str(arguments.get("path") or "")
     old_text = arguments.get("old_text")
@@ -206,7 +207,7 @@ def file_patch(arguments: dict[str, object], *, workspace: Path) -> ToolExecutio
 
 
 def ask_human(arguments: dict[str, object]) -> ToolExecutionResult:
-    """사용자 질문/선택 요청을 에이전트가 멈춰 처리할 수 있게 구조화합니다."""
+    """Represent a pending human input request."""
 
     questions = arguments.get("questions")
     if isinstance(questions, str):
@@ -229,7 +230,7 @@ def ask_human(arguments: dict[str, object]) -> ToolExecutionResult:
 
 
 def propose_actions(arguments: dict[str, object]) -> ToolExecutionResult:
-    """실행 전 승인 요청을 구조화해 반환합니다."""
+    """Represent a pending approval request before execution."""
 
     plan = arguments.get("plan")
     if plan is None:
@@ -249,7 +250,7 @@ def propose_actions(arguments: dict[str, object]) -> ToolExecutionResult:
 
 
 def test_run(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> ToolExecutionResult:
-    """프로젝트 테스트 명령을 워크스페이스 복사본에서 실행합니다."""
+    """Run a project test command in an isolated workspace copy."""
 
     command = str(arguments.get("command") or "python3 -m unittest discover")
     timeout_seconds = _coerce_timeout(arguments.get("timeout_seconds"), default=60.0, maximum=300.0)
@@ -261,7 +262,7 @@ def test_run(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> T
 
 
 def tool_create(arguments: dict[str, object], *, tool_library: Path) -> ToolExecutionResult:
-    """새 툴 코드를 툴 라이브러리에 저장합니다. 코드는 저장 전 문법만 검증합니다."""
+    """Create generated-tool source and metadata without manifest registration."""
 
     name = str(arguments.get("name") or "")
     description = str(arguments.get("description") or "")
@@ -289,7 +290,9 @@ def tool_create(arguments: dict[str, object], *, tool_library: Path) -> ToolExec
         "name": name,
         "description": description,
         "path": str(code_path),
+        "file_path": str(code_path),
         "status": "created_unloaded",
+        "validation_status": "created_unloaded",
     }
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     return ToolExecutionResult(success=True, output=metadata)
@@ -301,7 +304,7 @@ def tool_validate(
     tool_library: Path,
     sandbox: LocalSandboxBackend,
 ) -> ToolExecutionResult:
-    """생성된 Python 도구의 문법과 샘플 실행 가능성을 검증합니다."""
+    """Validate generated Python tool syntax and sample execution."""
 
     name = str(arguments.get("name") or "")
     if not _SAFE_NAME_PATTERN.match(name):
@@ -339,10 +342,32 @@ def tool_validate(
     if result.success:
         metadata_path = tool_library / f"{name}.json"
         metadata = _read_json_object(metadata_path)
-        metadata.update({"status": "validated", "validated": True})
+        metadata.update({"status": "validated", "validated": True, "validation_status": "passed"})
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         result.output["tool"] = metadata
     return result
+
+
+def tool_approve(arguments: dict[str, object], *, tool_library: Path) -> ToolExecutionResult:
+    """Register a validated generated tool in the manifest catalog."""
+
+    name = str(arguments.get("name") or "")
+    if not _SAFE_NAME_PATTERN.match(name):
+        return ToolExecutionResult(success=False, output="", error="name은 영문/숫자/밑줄 2~64자여야 합니다.")
+
+    metadata_path = tool_library / f"{name}.json"
+    code_path = tool_library / f"{name}.py"
+    if not metadata_path.exists() or not code_path.exists():
+        return ToolExecutionResult(success=False, output="", error=f"승인할 생성 툴을 찾을 수 없습니다: {name}")
+
+    metadata = _read_json_object(metadata_path)
+    if metadata.get("validation_status") != "passed":
+        return ToolExecutionResult(success=False, output=metadata, error="검증을 통과한 툴만 승인 등록할 수 있습니다.")
+
+    metadata.update({"status": "approved", "approved": True, "approval_status": "approved"})
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    catalog_metadata = SkillCatalog(tool_library).upsert(metadata)
+    return ToolExecutionResult(success=True, output={"tool": metadata, "catalog": catalog_metadata})
 
 
 def tool_search(
@@ -351,7 +376,7 @@ def tool_search(
     registered_tools: list[dict[str, Any]],
     tool_library: Path,
 ) -> ToolExecutionResult:
-    """등록 툴과 생성 툴 메타데이터를 이름/설명 기준으로 검색합니다."""
+    """Search registered and approved generated-tool metadata."""
 
     query = str(arguments.get("query") or "").casefold()
     generated_tools = _load_generated_tool_metadata(tool_library)
@@ -368,7 +393,7 @@ def tool_search(
 
 
 def memory_read(arguments: dict[str, object], *, memory_dir: Path) -> ToolExecutionResult:
-    """에이전트 로컬 메모리 JSON 값을 읽습니다."""
+    """Read a JSON value from local agent memory."""
 
     key = str(arguments.get("key") or "")
     resolved = _resolve_memory_path(memory_dir, key)
@@ -380,7 +405,7 @@ def memory_read(arguments: dict[str, object], *, memory_dir: Path) -> ToolExecut
 
 
 def memory_write(arguments: dict[str, object], *, memory_dir: Path) -> ToolExecutionResult:
-    """사용자 승인 이후 저장할 수 있는 에이전트 로컬 메모리 값을 씁니다."""
+    """Write a JSON value to local agent memory."""
 
     key = str(arguments.get("key") or "")
     value = arguments.get("value")
@@ -396,7 +421,7 @@ def memory_write(arguments: dict[str, object], *, memory_dir: Path) -> ToolExecu
 
 
 def suggested_builtin_tools(_arguments: dict[str, object]) -> ToolExecutionResult:
-    """현재 내장 툴 외에 다음 단계에서 유용한 후보를 반환합니다."""
+    """Return candidate builtin tools for future core expansion."""
 
     return ToolExecutionResult(
         success=True,
@@ -539,19 +564,7 @@ def _unified_diff_preview(before: str, after: str, path: str) -> str:
 
 
 def _load_generated_tool_metadata(tool_library: Path) -> list[dict[str, Any]]:
-    if not tool_library.exists():
-        return []
-    tools: list[dict[str, Any]] = []
-    for metadata_path in sorted(tool_library.glob("*.json")):
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(metadata, dict):
-            metadata.setdefault("category", "generated")
-            metadata.setdefault("safety_level", "unknown")
-            tools.append(metadata)
-    return tools
+    return SkillCatalog(tool_library).list()
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:

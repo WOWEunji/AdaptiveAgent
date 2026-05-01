@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from adaptive_agent.skills import MANIFEST_FILENAME
 from adaptive_agent.tools.registry import create_default_registry
 
 
@@ -213,7 +214,7 @@ class BuiltinToolsTest(unittest.TestCase):
 
         self.assertTrue(result.success)
 
-    def test_tool_create_and_search_generated_tool_metadata(self) -> None:
+    def test_tool_create_keeps_generated_tool_out_of_manifest_until_approval(self) -> None:
         create_result = self.run_tool(
             "tool_create",
             {
@@ -227,8 +228,9 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertTrue(create_result.success)
         self.assertEqual(create_result.output["status"], "created_unloaded")
         self.assertTrue((self.workspace / ".adaptive_agent" / "tools" / "hello_tool.py").exists())
+        self.assertFalse((self.workspace / ".adaptive_agent" / "tools" / MANIFEST_FILENAME).exists())
         self.assertTrue(search_result.success)
-        self.assertIn("hello_tool", {match["name"] for match in search_result.output["matches"]})
+        self.assertNotIn("hello_tool", {match["name"] for match in search_result.output["matches"]})
 
     def test_tool_validate_runs_generated_tool_in_sandbox(self) -> None:
         self.run_tool(
@@ -251,7 +253,51 @@ class BuiltinToolsTest(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.output["tool"]["status"], "validated")
+        self.assertFalse((self.workspace / ".adaptive_agent" / "tools" / MANIFEST_FILENAME).exists())
         self.assertIn('"hello": "Ada"', result.output["execution"]["stdout"])
+
+    def test_tool_approve_registers_validated_tool_in_manifest(self) -> None:
+        self.run_tool(
+            "tool_create",
+            {
+                "name": "hello_tool",
+                "description": "Greets a user",
+                "code": "def run(arguments):\n    return {'hello': arguments.get('name')}\n",
+            },
+        )
+        self.run_tool(
+            "tool_validate",
+            {
+                "name": "hello_tool",
+                "sample_arguments": {"name": "Ada"},
+                "expected_output": '"hello": "Ada"',
+            },
+        )
+
+        approve_result = self.run_tool("tool_approve", {"name": "hello_tool"})
+        search_result = self.run_tool("tool_search", {"query": "greet"})
+
+        self.assertTrue(approve_result.success)
+        self.assertEqual(approve_result.output["catalog"]["validation_status"], "passed")
+        self.assertEqual(approve_result.output["tool"]["approval_status"], "approved")
+        self.assertTrue((self.workspace / ".adaptive_agent" / "tools" / MANIFEST_FILENAME).exists())
+        self.assertIn("hello_tool", {match["name"] for match in search_result.output["matches"]})
+
+    def test_tool_approve_rejects_unvalidated_tool(self) -> None:
+        self.run_tool(
+            "tool_create",
+            {
+                "name": "draft_tool",
+                "description": "Draft only",
+                "code": "def run(arguments):\n    return {'ok': True}\n",
+            },
+        )
+
+        result = self.run_tool("tool_approve", {"name": "draft_tool"})
+
+        self.assertFalse(result.success)
+        self.assertIn("검증을 통과한 툴만", result.error)
+        self.assertFalse((self.workspace / ".adaptive_agent" / "tools" / MANIFEST_FILENAME).exists())
 
     def test_tool_validate_policy_blocks_generated_tool_side_effects(self) -> None:
         self.run_tool(

@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 @dataclass(frozen=True)
 class Tool:
-    """에이전트가 호출할 수 있는 툴 정의입니다."""
+    """Callable tool definition exposed to planning and execution."""
 
     name: str
     description: str
@@ -21,7 +21,7 @@ class Tool:
 
 @dataclass(frozen=True)
 class ToolExecutionResult:
-    """툴 실행 결과를 표준화합니다."""
+    """Standard result envelope for tool execution."""
 
     success: bool
     output: Any

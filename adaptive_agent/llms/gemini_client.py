@@ -1,4 +1,4 @@
-"""Google Gemini client (Google GenAI SDK — AI Studio API 키)."""
+"""Google Gemini client using the Google GenAI SDK."""
 
 from __future__ import annotations
 
@@ -35,14 +35,14 @@ def validate_gemini_api_key(key: str | None) -> str:
 
 
 class GeminiClient:
-    """`google-genai` — Gemini Developer API(API 키). GCP Project ID 불필요."""
+    """Gemini Developer API client for API-key based access."""
 
     def __init__(self, model: str, *, api_key: str | None = None) -> None:
         self._model = model
         self._api_key = validate_gemini_api_key(_resolve_api_key(api_key))
 
     def complete(self, prompt: str) -> str:
-        """에이전트 코어가 호출하는 표준 LLM completion 메서드입니다."""
+        """Compatibility completion method used by the agent core."""
 
         return self.generate(prompt)
 

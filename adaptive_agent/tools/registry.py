@@ -10,7 +10,7 @@ from adaptive_agent.tools.sandbox import LocalSandboxBackend
 
 
 class ToolRegistry:
-    """실행 가능한 툴을 등록하고 이름으로 조회합니다."""
+    """In-memory index of executable tools."""
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
@@ -31,7 +31,7 @@ def create_default_registry(
     workspace_dir: Path | None = None,
     tool_library_dir: Path | None = None,
 ) -> ToolRegistry:
-    """초기 프로젝트에서 사용할 내장 툴을 등록합니다."""
+    """Create the default builtin tool registry."""
 
     registry = ToolRegistry()
     workspace = (workspace_dir or Path.cwd()).resolve()
@@ -43,7 +43,7 @@ def create_default_registry(
         return ToolExecutionResult(success=True, output=arguments.get("task", ""))
 
     def analyze_requirements(_arguments: dict[str, object]) -> ToolExecutionResult:
-        """reference.md 방법론을 구현 과제로 분해한 결과를 반환합니다."""
+        """Return structured implementation tasks derived from reference.md."""
 
         return ToolExecutionResult(success=True, output=_requirements_breakdown())
 
@@ -252,6 +252,16 @@ def create_default_registry(
     )
     registry.register(
         Tool(
+            name="tool_approve",
+            description="사용자 승인 후 검증된 생성 도구를 manifest 스킬 카탈로그에 등록합니다.",
+            handler=lambda arguments: builtins.tool_approve(arguments, tool_library=tool_library),
+            category="tool_library",
+            safety_level="high",
+            usage="python3 -m adaptive_agent --json --tool tool_approve --arg name=my_tool",
+        )
+    )
+    registry.register(
+        Tool(
             name="memory_read",
             description="에이전트 로컬 메모리 값을 읽습니다.",
             handler=lambda arguments: builtins.memory_read(arguments, memory_dir=memory_dir),
@@ -284,7 +294,7 @@ def create_default_registry(
 
 
 def _requirements_breakdown() -> dict[str, object]:
-    """reference.md 기반 요구사항 분해 결과를 구조화된 데이터로 제공합니다."""
+    """Structured requirements breakdown derived from reference.md."""
 
     return {
         "goal": "CLI 기반 AdaptiveAgent가 자연어 작업을 분석하고 필요한 툴을 생성/검증/재사용한다.",
