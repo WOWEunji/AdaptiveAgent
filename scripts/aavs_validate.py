@@ -112,6 +112,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         prompt=(
             "From the JSON data below, identify monsters with hp >= 100 and compute their "
             "average hp. Use an executable tool with a standard JSON parser for the calculation, "
+            "keep the JSON as text in the generated code and parse it with json.loads/json.load, "
             "then answer from the execution result.\n"
             '[{"name":"Goblin","hp":80},{"name":"Orc","hp":150},{"name":"Dragon","hp":300}]'
         ),
@@ -187,6 +188,11 @@ def main() -> int:
     parser.add_argument("--output", default="", help="Write JSON execution records to this path")
     parser.add_argument("--markdown-output", default="", help="Write markdown execution records to this path")
     parser.add_argument("--output-dir", default="", help="Directory for records.json and records.md")
+    parser.add_argument(
+        "--timeout-seconds",
+        default="",
+        help="Per-scenario CLI timeout. Defaults to 180s for OpenAI and 600s for Ollama.",
+    )
     args = parser.parse_args()
 
     requested = set((args.scenario or []) + (args.scenarios or []))
@@ -201,8 +207,17 @@ def main() -> int:
         env["OLLAMA_MODEL"] = model
 
     records: list[ScenarioRecord] = []
+    timeout_seconds = parse_timeout_seconds(args.timeout_seconds, args.provider)
     for scenario in selected:
-        records.append(run_scenario(scenario, provider=args.provider, model=model, env=env))
+        records.append(
+            run_scenario(
+                scenario,
+                provider=args.provider,
+                model=model,
+                env=env,
+                timeout_seconds=timeout_seconds,
+            )
+        )
 
     output_path = Path(args.output) if args.output else None
     markdown_path = Path(args.markdown_output) if args.markdown_output else None
@@ -230,7 +245,24 @@ def main() -> int:
 def default_model(provider: str, env: dict[str, str]) -> str:
     if provider == "openai":
         return env.get("OPENAI_MODEL", "gpt-5-nano")
-    return env.get("OLLAMA_MODEL", "qwen2.5:1.5b")
+    return env.get("OLLAMA_MODEL", "qwen3.5:2b")
+
+
+def default_timeout_seconds(provider: str) -> float:
+    """Ollama runs locally on a CPU GitHub runner, so it needs a longer per-scenario budget."""
+
+    return 600.0 if provider == "ollama" else 180.0
+
+
+def parse_timeout_seconds(raw_timeout: str, provider: str) -> float:
+    """빈 workflow 입력값은 provider별 기본 timeout으로 처리합니다."""
+
+    if not raw_timeout.strip():
+        return default_timeout_seconds(provider)
+    try:
+        return float(raw_timeout)
+    except ValueError as exc:
+        raise SystemExit(f"--timeout-seconds must be a number, got: {raw_timeout!r}") from exc
 
 
 def run_scenario(
@@ -239,6 +271,7 @@ def run_scenario(
     provider: str,
     model: str,
     env: dict[str, str],
+    timeout_seconds: float,
 ) -> ScenarioRecord:
     started_at = utc_now()
     command = [sys.executable, "-m", "adaptive_agent", "--json", "--llm", provider, scenario.prompt]
@@ -246,18 +279,26 @@ def run_scenario(
         run_env = env.copy()
         run_env["ADAPTIVE_AGENT_WORKSPACE"] = str(REPO_ROOT)
         run_env["ADAPTIVE_AGENT_TOOL_LIBRARY"] = str(Path(temp_dir) / "tools")
-        completed = subprocess.run(
-            command,
-            cwd=REPO_ROOT,
-            env=run_env,
-            text=True,
-            capture_output=True,
-            timeout=180,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=REPO_ROOT,
+                env=run_env,
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+            returncode = completed.returncode
+            stdout = completed.stdout
+            stderr = completed.stderr
+        except subprocess.TimeoutExpired as exc:
+            returncode = 124
+            stdout = decode_timeout_output(exc.stdout)
+            stderr = decode_timeout_output(exc.stderr) or f"Timed out after {timeout_seconds:g}s"
     completed_at = utc_now()
-    parsed = parse_result(completed.stdout)
-    checks = evaluate_scenario(scenario, completed.returncode, parsed)
+    parsed = parse_result(stdout)
+    checks = evaluate_scenario(scenario, returncode, parsed)
     passed = all(checks.values()) if scenario.expect_pass else not all(checks.values())
     return ScenarioRecord(
         scenario_id=scenario.scenario_id,
@@ -268,15 +309,15 @@ def run_scenario(
         command=command,
         started_at=started_at,
         completed_at=completed_at,
-        returncode=completed.returncode,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
         parsed_result=parsed,
         checks=checks,
         passed=passed,
-        failure_classification=classify_failure(completed.returncode, parsed, checks),
+        failure_classification=classify_failure(returncode, parsed, checks),
         validation_scope=build_validation_scope(parsed),
-        notes=scenario.notes,
+        notes=f"{scenario.notes} timeout_seconds={timeout_seconds:g}".strip(),
     )
 
 
@@ -286,6 +327,14 @@ def parse_result(stdout: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def decode_timeout_output(value: bytes | str | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 def evaluate_scenario(scenario: Scenario, returncode: int, parsed: dict[str, Any] | None) -> dict[str, bool]:

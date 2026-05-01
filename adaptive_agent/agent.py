@@ -276,23 +276,56 @@ class AdaptiveAgent:
     def _loads_plan_json(self, response: str) -> object:
         """LLM이 JSON 계획을 문자열로 한 번 더 감싸 반환해도 계획 객체로 복원합니다."""
 
-        try:
-            parsed: object = json.loads(response)
-        except json.JSONDecodeError:
-            return response
-        if isinstance(parsed, str):
+        parsed: object = response
+        for _ in range(3):
+            if not isinstance(parsed, str):
+                return parsed
             stripped = parsed.strip()
-            if stripped.startswith("{") and stripped.endswith("}"):
+            if not stripped:
+                return parsed
+            try:
+                parsed = json.loads(stripped)
+                continue
+            except json.JSONDecodeError:
+                extracted = self._extract_json_object(stripped)
+                if extracted == stripped:
+                    return parsed
                 try:
-                    return json.loads(stripped)
+                    parsed = json.loads(extracted)
+                    continue
                 except json.JSONDecodeError:
                     return parsed
         return parsed
+
+    def _extract_json_object(self, text: str) -> str:
+        """응답 주변에 따옴표나 설명이 붙은 경우 첫 JSON object 후보를 추출합니다."""
+
+        text = self._strip_markdown_code_fence(text)
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return text
+        return text[start : end + 1]
+
+    def _strip_markdown_code_fence(self, text: str) -> str:
+        """작은 로컬 모델이 자주 붙이는 ```json fence를 제거합니다."""
+
+        stripped = text.strip()
+        if not stripped.startswith("```"):
+            return text
+        lines = stripped.splitlines()
+        if len(lines) >= 2 and lines[0].startswith("```"):
+            if lines[-1].strip() == "```":
+                return "\n".join(lines[1:-1]).strip()
+            return "\n".join(lines[1:]).strip()
+        return text
 
     def _normalize_plan(self, parsed: object, *, fallback_response: str) -> dict[str, Any]:
         """LLM 계획 JSON을 Agent가 실행 가능한 최소 계약으로 정규화합니다."""
 
         if not isinstance(parsed, dict):
+            if isinstance(parsed, str) and self._looks_like_clarification_response(parsed):
+                return self._ask_human_plan(parsed)
             return {
                 "action": "respond",
                 "response": fallback_response,
@@ -303,6 +336,24 @@ class AdaptiveAgent:
         if isinstance(raw_action, str) and self._is_clarification_action(raw_action):
             response = self._clarification_text(parsed, fallback_response)
             return self._ask_human_plan(response)
+
+        if raw_action not in _VALID_PLAN_ACTIONS:
+            if isinstance(raw_action, str) and self.registry.get(raw_action) is not None:
+                parsed = {**parsed, "action": "tool", "tool_name": parsed.get("tool_name") or raw_action}
+                raw_action = "tool"
+            elif isinstance(parsed.get("tool_name"), str):
+                parsed = {**parsed, "action": "tool"}
+                raw_action = "tool"
+            else:
+                embedded_plan = self._loads_plan_json(str(parsed.get("response") or ""))
+                if isinstance(embedded_plan, dict):
+                    return self._normalize_plan(embedded_plan, fallback_response=fallback_response)
+                return {
+                    "action": "respond",
+                    "response": str(parsed.get("response") or fallback_response),
+                    "_validation_error": "unsupported_action",
+                    "needs_user_input": bool(parsed.get("needs_user_input")),
+                }
 
         if raw_action not in _VALID_PLAN_ACTIONS:
             return {
@@ -320,7 +371,14 @@ class AdaptiveAgent:
                     "response": fallback_response,
                     "_validation_error": "invalid_response",
                 }
+            embedded_plan = self._loads_plan_json(response)
+            if isinstance(embedded_plan, dict):
+                embedded_action = embedded_plan.get("action")
+                if embedded_action in _VALID_PLAN_ACTIONS or isinstance(embedded_plan.get("tool_name"), str):
+                    return self._normalize_plan(embedded_plan, fallback_response=fallback_response)
             if bool(parsed.get("needs_user_input")):
+                return self._ask_human_plan(response)
+            if self._looks_like_clarification_response(response):
                 return self._ask_human_plan(response)
             return {
                 "action": "respond",
@@ -343,13 +401,71 @@ class AdaptiveAgent:
                 "response": "툴 실행 인자가 객체가 아니어서 실행하지 않았습니다.",
                 "_validation_error": "invalid_tool_arguments",
             }
+        arguments = self._normalize_tool_arguments(tool_name, arguments, parsed)
         return {"action": "tool", "tool_name": tool_name, "arguments": arguments}
+
+    def _normalize_tool_arguments(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        parsed: dict[str, Any],
+    ) -> dict[str, Any]:
+        """LLM이 흔히 쓰는 인자 alias를 실제 내장 툴 계약으로 보정합니다."""
+
+        normalized = dict(arguments)
+        lang = normalized.get("arg_lang", parsed.get("arg_lang", parsed.get("language")))
+        if "lang" not in normalized and isinstance(lang, str):
+            normalized["lang"] = lang
+        if tool_name != "code_execute":
+            return normalized
+
+        stdin_value = normalized.get(
+            "arg_input",
+            parsed.get(
+                "arg_input",
+                normalized.get(
+                    "input",
+                    parsed.get("input", normalized.get("input_text", parsed.get("input_text", normalized.get("stdin", parsed.get("stdin"))))),
+                ),
+            ),
+        )
+        if stdin_value is not None and isinstance(normalized.get("code"), str):
+            normalized["code"] = self._inline_code_input(normalized["code"], stdin_value)
+        return normalized
+
+    def _inline_code_input(self, code: str, stdin_value: Any) -> str:
+        """stdin을 지원하지 않는 code_execute에서 입력 alias를 안전하게 인라인합니다."""
+
+        replacement = f"({stdin_value!r})"
+        return code.replace("sys.stdin.read()", replacement).replace("input()", replacement)
 
     def _is_clarification_action(self, raw_action: str) -> bool:
         normalized = raw_action.strip().lower().replace("-", "_").replace(" ", "_")
         return normalized in _CLARIFICATION_ACTIONS or any(
             token in normalized for token in ("ask", "clarif", "input")
         )
+
+    def _looks_like_clarification_response(self, response: str) -> bool:
+        """LLM이 계획 대신 직접 추가정보 요청 문장을 낸 경우 HITL로 정규화합니다."""
+
+        normalized = response.casefold()
+        clarification_markers = (
+            "please provide",
+            "provide more",
+            "provide more details",
+            "more details",
+            "more detail",
+            "need access",
+            "need credentials",
+            "missing",
+            "which data",
+            "what data",
+            "clarify",
+            "추가 정보",
+            "알려주세요",
+            "제공",
+        )
+        return any(marker in normalized for marker in clarification_markers)
 
     def _clarification_text(self, parsed: dict[str, Any], fallback_response: str) -> str:
         response = parsed.get("response")
@@ -387,13 +503,20 @@ class AdaptiveAgent:
             "using the original task only.\n"
             "Use tools for deterministic work, structured data processing, file operations, "
             "tests, or calculations. For JSON, CSV, or other structured data, prefer Python code "
-            "through code_execute and use standard parsers such as json or csv; do not parse "
-            "structured data with regular expressions or brittle string splitting. If a task is "
+            "through code_execute and use standard parsers such as json or csv. Keep structured "
+            "input as text in the generated code and parse that text with json.loads, csv.DictReader, "
+            "or an equivalent standard parser; do not convert the user's JSON/CSV sample into a "
+            "Python list/dict literal, and do not parse structured data with regular expressions "
+            "or brittle string splitting. Use code_execute for structured data processing; use "
+            "shell_run only when the user explicitly asks to run a shell command, and never for JSON, "
+            "CSV, calculations, or data cleanup. Use analyze_requirements only when the user asks "
+            "about AdaptiveAgent project requirements, never for private user data, databases, "
+            "business analysis, or external resource access. If a task is "
             "ambiguous, requires missing private credentials/data, or requires user permission, "
             "Use ask_human instead of guessing. Do not fabricate external data or credentials. "
             "For one-off deterministic analysis, generate general Python code that solves the "
             "class of task, not code tailored to a single expected answer.\n"
-            "Return only JSON in one of these forms:\n"
+            "Return only raw JSON, with no Markdown fences, in one of these forms:\n"
             '{"action":"tool","tool_name":"<tool name>","arguments":{...}}\n'
             '{"action":"respond","response":"<answer>","needs_user_input":false}\n'
             '{"action":"respond","response":"<clarifying question>","needs_user_input":true}\n'
@@ -414,8 +537,10 @@ class AdaptiveAgent:
         return (
             "You are AdaptiveAgent repairing a failed tool execution. Keep the original task "
             "unchanged and fix the general cause of the failure. Do not hard-code only the "
-            "expected answer. If the task involves structured data, keep using standard parsers "
-            "such as json or csv. Return only JSON using the same plan schema as before.\n"
+            "expected answer. If the task involves structured data, keep the structured input as "
+            "text and parse it with standard parsers such as json.loads or csv.DictReader; do not "
+            "replace the input with a Python literal. Return only JSON using the same plan schema "
+            "as before.\n"
             f"Original user task: {task}\n"
             f"Failed plan: {json.dumps(failed_plan, ensure_ascii=False)}\n"
             f"Observed error: {error}\n"

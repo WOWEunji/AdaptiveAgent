@@ -204,7 +204,7 @@ python3 -m adaptive_agent --tool list_files --arg path=. --json
 Ollama 검증:
 
 ```bash
-ollama pull qwen2.5:1.5b
+ollama pull qwen3.5:2b
 python3 -m adaptive_agent "AdaptiveAgent의 다음 구현 단계를 요약해줘"
 ```
 
