@@ -30,6 +30,10 @@ class AgentConfig:
     workspace_dir: Path = Path.cwd()
     tool_library_dir: Path = Path.cwd() / ".adaptive_agent" / "tools"
     max_self_corrections: int = 2
+    max_router_steps: int = 8
+    ollama_timeout_seconds: float = 60.0
+    ollama_num_predict: int = 256
+    ollama_think: bool = False
 
     @classmethod
     def from_env(
@@ -66,4 +70,8 @@ class AgentConfig:
             workspace_dir=workspace_dir,
             tool_library_dir=tool_library_dir,
             max_self_corrections=int(os.getenv("ADAPTIVE_AGENT_MAX_SELF_CORRECTIONS", "2")),
+            max_router_steps=int(os.getenv("ADAPTIVE_AGENT_MAX_ROUTER_STEPS", "8")),
+            ollama_timeout_seconds=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60")),
+            ollama_num_predict=int(os.getenv("OLLAMA_NUM_PREDICT", "256")),
+            ollama_think=os.getenv("OLLAMA_THINK", "false").strip().lower() in {"1", "true", "yes", "on"},
         )

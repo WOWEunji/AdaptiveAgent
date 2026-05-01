@@ -29,6 +29,23 @@ User / CLI
   -> SkillCatalog
 ```
 
+## 1차 구현 루프
+
+상세 구현의 첫 목표는 전체 목표 아키텍처를 한 번에 완성하는 것이 아니라, 라우터가 `AgentState.next_node`를 기준으로 실제 노드 루프를 돌게 만드는 것입니다.
+
+```mermaid
+flowchart TD
+  userTask["User Task"] --> planNode["PlanNode"]
+  planNode --> executeNode["ExecuteNode"]
+  executeNode --> criticNode["CriticNode"]
+  criticNode -->|"accepted"| doneNode["Done"]
+  criticNode -->|"retry needed"| planNode
+  planNode -->|"needs user input"| approvalResponse["Approval/Input Response"]
+  executeNode -->|"tool failure"| planNode
+```
+
+1차 구현 범위는 `plan -> execute -> critique -> done/error`입니다. 사용자 승인이나 추가 입력이 필요하면 상태와 응답을 반환하는 선에서 멈추고, CLI 세션 재개와 승인 입력 루프는 다음 단계에서 다룹니다.
+
 ## 목표 모듈 역할
 
 | 영역 | 책임 |
