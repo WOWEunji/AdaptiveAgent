@@ -33,6 +33,7 @@ class OllamaClient:
         response = client.chat(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
+            format="json",
             options={"temperature": 0, "num_predict": self.num_predict},
             think=self.think,
         )
