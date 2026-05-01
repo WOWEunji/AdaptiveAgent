@@ -129,6 +129,7 @@ class AdaptiveAgentTest(unittest.TestCase):
         prompt = llm.prompts[0]
         self.assertIn("Use tools for deterministic work", prompt)
         self.assertIn("standard parsers such as json or csv", prompt)
+        self.assertIn("Keep structured input as text", prompt)
         self.assertIn("not code tailored to a single expected answer", prompt)
         self.assertIn("Use ask_human", prompt)
 

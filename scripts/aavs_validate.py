@@ -112,6 +112,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         prompt=(
             "From the JSON data below, identify monsters with hp >= 100 and compute their "
             "average hp. Use an executable tool with a standard JSON parser for the calculation, "
+            "keep the JSON as text in the generated code and parse it with json.loads/json.load, "
             "then answer from the execution result.\n"
             '[{"name":"Goblin","hp":80},{"name":"Orc","hp":150},{"name":"Dragon","hp":300}]'
         ),
