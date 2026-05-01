@@ -245,10 +245,7 @@ class AdaptiveAgent:
         """LLM에게 원문 task와 툴 목록을 전달해 실행 계획을 받습니다."""
 
         response = self.llm_client.complete(self._build_prompt(task))
-        try:
-            parsed = json.loads(response)
-        except json.JSONDecodeError:
-            return {"action": "respond", "response": response}
+        parsed = self._loads_plan_json(response)
 
         return self._normalize_plan(parsed, fallback_response=response)
 
@@ -271,10 +268,26 @@ class AdaptiveAgent:
             )
         )
         try:
-            parsed = json.loads(response)
+            parsed = self._loads_plan_json(response)
         except json.JSONDecodeError:
-            return {"action": "respond", "response": response}
+            parsed = response
         return self._normalize_plan(parsed, fallback_response=response)
+
+    def _loads_plan_json(self, response: str) -> object:
+        """LLM이 JSON 계획을 문자열로 한 번 더 감싸 반환해도 계획 객체로 복원합니다."""
+
+        try:
+            parsed: object = json.loads(response)
+        except json.JSONDecodeError:
+            return response
+        if isinstance(parsed, str):
+            stripped = parsed.strip()
+            if stripped.startswith("{") and stripped.endswith("}"):
+                try:
+                    return json.loads(stripped)
+                except json.JSONDecodeError:
+                    return parsed
+        return parsed
 
     def _normalize_plan(self, parsed: object, *, fallback_response: str) -> dict[str, Any]:
         """LLM 계획 JSON을 Agent가 실행 가능한 최소 계약으로 정규화합니다."""

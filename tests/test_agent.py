@@ -162,6 +162,19 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertIn("fixed", str(result.output))
         self.assertEqual(len(llm.prompts), 2)
 
+    def test_double_encoded_json_plan_is_executed(self) -> None:
+        llm = StubLLM(
+            '"{\\"action\\":\\"tool\\",\\"tool_name\\":\\"echo\\",'
+            '\\"arguments\\":{\\"task\\":\\"decoded\\"}}"'
+        )
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+
+        result = agent.run("이중 인코딩된 계획")
+
+        self.assertEqual(result.action, "tool")
+        self.assertEqual(result.tool_name, "echo")
+        self.assertEqual(result.output, "decoded")
+
     def test_tool_plan_without_tool_name_is_rejected(self) -> None:
         llm = StubLLM('{"action":"tool","arguments":{"task":"원문 그대로"}}')
         agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
