@@ -19,6 +19,8 @@ class OllamaClient:
         response = client.chat(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
+            format="json",
+            options={"temperature": 0},
         )
         return str(response["message"]["content"])
 
