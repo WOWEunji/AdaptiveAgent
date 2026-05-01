@@ -6,6 +6,7 @@ import unittest
 
 from adaptive_agent.agent import AdaptiveAgent
 from adaptive_agent.config import AgentConfig
+from adaptive_agent.nodes import CoderNode, CriticNode
 from adaptive_agent.prompts import PromptLoader
 from adaptive_agent.router import StateMachineRouter
 
@@ -127,29 +128,39 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertIn("tool_spec_created", event_names)
         self.assertIn("tool_code_created", event_names)
 
-    def test_prompt_instructs_general_structured_data_tool_use(self) -> None:
+    def test_plan_prompt_receives_original_task(self) -> None:
         llm = StubLLM()
         agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
 
         agent.run("아래 JSON을 분석해줘: []")
 
         prompt = llm.prompts[0]
-        self.assertIn("Use tools for deterministic work", prompt)
-        self.assertIn("standard parsers such as json or csv", prompt)
-        self.assertIn("Keep structured input as text", prompt)
-        self.assertIn("never for JSON, CSV, calculations, or data cleanup", prompt)
-        self.assertIn("Use analyze_requirements only", prompt)
-        self.assertIn("not code tailored to a single expected answer", prompt)
-        self.assertIn("Use ask_human", prompt)
+        self.assertIn("아래 JSON을 분석해줘: []", prompt)
+        self.assertNotIn("{task}", prompt)
+        self.assertNotIn("{available_tools}", prompt)
 
     def test_default_plan_prompt_file_renders_dynamic_context(self) -> None:
         loader = PromptLoader()
 
         prompt = loader.render("plan.txt", available_tools="[]", task="원문 유지")
 
-        self.assertIn("You are AdaptiveAgent", prompt)
-        self.assertIn("Available tools: []", prompt)
-        self.assertIn("Original user task: 원문 유지", prompt)
+        self.assertIn("[]", prompt)
+        self.assertIn("원문 유지", prompt)
+        self.assertNotIn("{available_tools}", prompt)
+        self.assertNotIn("{task}", prompt)
+
+    def test_role_prompt_files_are_loadable(self) -> None:
+        loader = PromptLoader()
+
+        for template_name in ("coder.txt", "critic.txt"):
+            prompt = loader.load(template_name)
+            self.assertGreater(len(prompt.strip()), 0)
+
+    def test_role_nodes_point_to_role_prompt_templates(self) -> None:
+        nodes = [CoderNode(), CriticNode()]
+
+        self.assertEqual([node.name for node in nodes], ["code", "critique"])
+        self.assertEqual([node.prompt_template for node in nodes], ["coder.txt", "critic.txt"])
 
     def test_unsupported_clarification_action_is_normalized_to_ask_human(self) -> None:
         llm = StubLLM('{"action":"clarify","response":"어떤 데이터인지 알려주세요."}')
@@ -266,6 +277,56 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertEqual(result.action, "tool")
         self.assertEqual(result.tool_name, "code_execute")
         self.assertIn("alias input", str(result.output))
+
+    def test_use_tool_action_is_normalized_to_tool_plan(self) -> None:
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM())
+
+        plan = agent._normalize_plan(
+            {"action": "use_tool", "tool_name": "echo", "arguments": {"task": "ok"}},
+            fallback_response="fallback",
+        )
+
+        self.assertEqual(plan, {"action": "tool", "tool_name": "echo", "arguments": {"task": "ok"}})
+
+    def test_create_tool_action_maps_top_level_fields_to_tool_create(self) -> None:
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM())
+
+        plan = agent._normalize_plan(
+            {
+                "action": "create_tool",
+                "name": "hello_tool",
+                "description": "Greets a user",
+                "code": "def run(arguments):\n    return arguments\n",
+            },
+            fallback_response="fallback",
+        )
+
+        self.assertEqual(plan["action"], "tool")
+        self.assertEqual(plan["tool_name"], "tool_create")
+        self.assertEqual(plan["arguments"]["name"], "hello_tool")
+        self.assertEqual(plan["arguments"]["description"], "Greets a user")
+        self.assertIn("def run", plan["arguments"]["code"])
+
+    def test_approve_tool_action_maps_to_tool_approve(self) -> None:
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM())
+
+        plan = agent._normalize_plan(
+            {"action": "approve_tool", "name": "hello_tool"},
+            fallback_response="fallback",
+        )
+
+        self.assertEqual(plan, {"action": "tool", "tool_name": "tool_approve", "arguments": {"name": "hello_tool"}})
+
+    def test_final_answer_action_is_normalized_to_response(self) -> None:
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM())
+
+        plan = agent._normalize_plan(
+            {"action": "final_answer", "answer": "완료"},
+            fallback_response="fallback",
+        )
+
+        self.assertEqual(plan["action"], "respond")
+        self.assertEqual(plan["response"], "완료")
 
     def test_tool_plan_without_tool_name_is_rejected(self) -> None:
         llm = StubLLM('{"action":"tool","arguments":{"task":"원문 그대로"}}')

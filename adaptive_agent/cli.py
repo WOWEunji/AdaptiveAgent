@@ -105,7 +105,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _parse_tool_args(raw_args: Sequence[str]) -> dict[str, object]:
-    """명시 툴 실행용 key=value 인자를 파싱합니다."""
+    """Parse key=value arguments for explicit tool execution."""
 
     parsed: dict[str, object] = {}
     for raw_arg in raw_args:

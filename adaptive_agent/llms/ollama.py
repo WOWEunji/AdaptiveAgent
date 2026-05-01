@@ -6,7 +6,7 @@ from adaptive_agent.llms.base import LLMClient
 
 
 class OllamaClient:
-    """로컬 Ollama 모델을 사용하는 LLM 클라이언트."""
+    """LLM client backed by a local Ollama model."""
 
     def __init__(self, model: str, *, host: str | None = None) -> None:
         self.model = model
@@ -23,7 +23,7 @@ class OllamaClient:
         return str(response["message"]["content"])
 
     def complete(self, prompt: str) -> str:
-        """Agent core가 사용하는 표준 completion 인터페이스입니다."""
+        """Compatibility completion method used by the agent core."""
 
         return self.generate(prompt)
 

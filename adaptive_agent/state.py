@@ -14,7 +14,7 @@ NodeName = Literal["retrieve", "plan", "code", "execute", "critique", "approve",
 
 @dataclass(frozen=True)
 class Message:
-    """LLM 대화와 툴 관찰 결과를 보존하는 단일 메시지입니다."""
+    """Persisted conversation or tool observation message."""
 
     role: MessageRole
     content: str
@@ -23,7 +23,7 @@ class Message:
 
 @dataclass(frozen=True)
 class ToolSchema:
-    """LLM과 실행기가 공유하는 툴 입력 계약입니다."""
+    """Tool input contract shared by planning and execution layers."""
 
     name: str
     description: str
@@ -36,7 +36,7 @@ class ToolSchema:
 
 @dataclass(frozen=True)
 class AgentEvent:
-    """PR/CLI/테스트에서 확인할 수 있는 실행 이벤트입니다."""
+    """Observable execution event for CLI, tests, and future PR logs."""
 
     name: str
     details: dict[str, Any] = field(default_factory=dict)
@@ -47,7 +47,7 @@ class AgentEvent:
 
 @dataclass
 class AgentState:
-    """한 번의 Agent 실행 세션에서 유지할 상태입니다."""
+    """Shared state for one AdaptiveAgent execution session."""
 
     session_id: str = field(default_factory=lambda: uuid4().hex)
     user_task: str = ""
@@ -70,11 +70,11 @@ class AgentState:
     summary: str = ""
 
     def record_event(self, name: str, **details: Any) -> None:
-        """관찰 가능한 실행 이벤트를 순서대로 기록합니다."""
+        """Append an ordered execution event."""
 
         self.events.append(AgentEvent(name=name, details=details))
 
     def append_message(self, role: MessageRole, content: str, *, tool_call_id: str | None = None) -> None:
-        """노드 간 공유 history에 메시지를 추가합니다."""
+        """Append a message to the node-shared history."""
 
         self.history.append(Message(role=role, content=content, tool_call_id=tool_call_id))

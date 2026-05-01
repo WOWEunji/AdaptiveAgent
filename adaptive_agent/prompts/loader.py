@@ -12,12 +12,12 @@ _SLOT_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 @dataclass(frozen=True)
 class PromptLoader:
-    """패키지 내부 프롬프트 파일을 읽어 동적 슬롯을 렌더링합니다."""
+    """Package-resource prompt loader with named slot rendering."""
 
     prompt_set: str = "default"
 
     def render(self, template_name: str, **values: object) -> str:
-        """지정한 프롬프트 템플릿을 읽고 `{slot}` 값을 치환합니다."""
+        """Render a prompt template by replacing `{slot}` values."""
 
         template = self.load(template_name)
         missing = sorted(set(_SLOT_PATTERN.findall(template)) - set(values))
@@ -31,7 +31,7 @@ class PromptLoader:
         return rendered
 
     def load(self, template_name: str) -> str:
-        """프롬프트 세트에서 UTF-8 텍스트 템플릿을 로드합니다."""
+        """Load a UTF-8 prompt template from the configured prompt set."""
 
         if "/" in template_name or "\\" in template_name:
             raise ValueError("template_name must be a file name, not a path")

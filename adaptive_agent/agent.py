@@ -18,7 +18,7 @@ from adaptive_agent.tools.registry import ToolRegistry, create_default_registry
 
 @dataclass
 class AgentResponse:
-    """Agent 실행 결과."""
+    """Single AdaptiveAgent run result."""
 
     task: str
     output: Any
@@ -43,7 +43,7 @@ _CLARIFICATION_ACTIONS = {
 
 
 class AdaptiveAgent:
-    """자연어 작업을 분석하고 필요한 툴을 실행하는 에이전트 골격."""
+    """CLI-oriented agent facade for planning, tool execution, and correction."""
 
     def __init__(
         self,
@@ -71,16 +71,16 @@ class AdaptiveAgent:
         )
 
     def list_tools(self) -> list:
-        """현재 등록된 툴 목록을 반환합니다."""
+        """Return currently registered tools."""
 
         return self.registry.list()
 
     def run(self, task: str) -> AgentResponse:
-        """사용자 원문 task를 LLM 계획에 따라 수행합니다."""
+        """Run one preserved user task through the state-machine router."""
         return self.router.run(task)
 
     def run_tool(self, tool_name: str, arguments: dict[str, Any]):
-        """명시적으로 지정된 툴을 실행합니다. 자연어 매칭을 수행하지 않습니다."""
+        """Execute an explicitly named tool without natural-language planning."""
 
         return self.executor.run(tool_name, arguments)
 
@@ -90,7 +90,7 @@ class AdaptiveAgent:
         plan: dict[str, Any],
         state: AgentState,
     ) -> AgentResponse | None:
-        """정규화된 LLM 계획을 실행하고 필요하면 제한된 self-correction을 수행합니다."""
+        """Execute a normalized tool plan with bounded self-correction."""
 
         if plan.get("action") != "tool":
             return None
@@ -238,7 +238,7 @@ class AdaptiveAgent:
         )
 
     def _plan_with_llm(self, task: str) -> dict[str, Any]:
-        """LLM에게 원문 task와 툴 목록을 전달해 실행 계획을 받습니다."""
+        """Create a normalized plan from the LLM response."""
 
         response = self.llm_client.complete(self._build_prompt(task))
         parsed = self._loads_plan_json(response)
@@ -253,7 +253,7 @@ class AdaptiveAgent:
         error: str | None,
         output: Any,
     ) -> dict[str, Any]:
-        """실패한 툴 실행 관찰을 바탕으로 수정 계획을 요청합니다."""
+        """Create a correction plan from failed tool execution observations."""
 
         response = self.llm_client.complete(
             self._build_correction_prompt(
@@ -270,7 +270,7 @@ class AdaptiveAgent:
         return self._normalize_plan(parsed, fallback_response=response)
 
     def _loads_plan_json(self, response: str) -> object:
-        """LLM이 JSON 계획을 문자열로 한 번 더 감싸 반환해도 계획 객체로 복원합니다."""
+        """Decode nested or fenced LLM plan JSON into a Python object."""
 
         parsed: object = response
         for _ in range(3):
@@ -294,7 +294,7 @@ class AdaptiveAgent:
         return parsed
 
     def _extract_json_object(self, text: str) -> str:
-        """응답 주변에 따옴표나 설명이 붙은 경우 첫 JSON object 후보를 추출합니다."""
+        """Extract the outermost JSON object candidate from free-form text."""
 
         text = self._strip_markdown_code_fence(text)
         start = text.find("{")
@@ -304,7 +304,7 @@ class AdaptiveAgent:
         return text[start : end + 1]
 
     def _strip_markdown_code_fence(self, text: str) -> str:
-        """작은 로컬 모델이 자주 붙이는 ```json fence를 제거합니다."""
+        """Remove a surrounding Markdown code fence from model output."""
 
         stripped = text.strip()
         if not stripped.startswith("```"):
@@ -317,7 +317,7 @@ class AdaptiveAgent:
         return text
 
     def _normalize_plan(self, parsed: object, *, fallback_response: str) -> dict[str, Any]:
-        """LLM 계획 JSON을 Agent가 실행 가능한 최소 계약으로 정규화합니다."""
+        """Normalize model output to the executable agent plan contract."""
 
         if not isinstance(parsed, dict):
             if isinstance(parsed, str) and self._looks_like_clarification_response(parsed):
@@ -332,6 +332,10 @@ class AdaptiveAgent:
         if isinstance(raw_action, str) and self._is_clarification_action(raw_action):
             response = self._clarification_text(parsed, fallback_response)
             return self._ask_human_plan(response)
+
+        if isinstance(raw_action, str):
+            parsed = self._normalize_plan_action_alias(parsed)
+            raw_action = parsed.get("action")
 
         if raw_action not in _VALID_PLAN_ACTIONS:
             if isinstance(raw_action, str) and self.registry.get(raw_action) is not None:
@@ -400,13 +404,58 @@ class AdaptiveAgent:
         arguments = self._normalize_tool_arguments(tool_name, arguments, parsed)
         return {"action": "tool", "tool_name": tool_name, "arguments": arguments}
 
+    def _normalize_plan_action_alias(self, parsed: dict[str, Any]) -> dict[str, Any]:
+        """Map node-level plan actions to the executable plan contract."""
+
+        raw_action = parsed.get("action")
+        if not isinstance(raw_action, str):
+            return parsed
+        normalized_action = raw_action.strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized_action == "use_tool":
+            return {
+                **parsed,
+                "action": "tool",
+                "tool_name": parsed.get("tool_name") or parsed.get("tool") or parsed.get("name"),
+            }
+        if normalized_action == "create_tool":
+            return {
+                **parsed,
+                "action": "tool",
+                "tool_name": "tool_create",
+                "arguments": self._arguments_with_top_level_fields(parsed, "name", "description", "code"),
+            }
+        if normalized_action in {"approve_tool", "store_tool"}:
+            return {
+                **parsed,
+                "action": "tool",
+                "tool_name": "tool_approve",
+                "arguments": self._arguments_with_top_level_fields(parsed, "name"),
+            }
+        if normalized_action == "final_answer":
+            return {
+                **parsed,
+                "action": "respond",
+                "response": str(parsed.get("response") or parsed.get("answer") or ""),
+            }
+        return parsed
+
+    def _arguments_with_top_level_fields(self, parsed: dict[str, Any], *fields: str) -> dict[str, Any]:
+        """Promote selected top-level plan fields into tool arguments."""
+
+        raw_arguments = parsed.get("arguments")
+        arguments = dict(raw_arguments) if isinstance(raw_arguments, dict) else {}
+        for field in fields:
+            if field not in arguments and field in parsed:
+                arguments[field] = parsed[field]
+        return arguments
+
     def _normalize_tool_arguments(
         self,
         tool_name: str,
         arguments: dict[str, Any],
         parsed: dict[str, Any],
     ) -> dict[str, Any]:
-        """LLM이 흔히 쓰는 인자 alias를 실제 내장 툴 계약으로 보정합니다."""
+        """Normalize common model argument aliases to builtin tool schemas."""
 
         normalized = dict(arguments)
         lang = normalized.get("arg_lang", parsed.get("arg_lang", parsed.get("language")))
@@ -430,7 +479,7 @@ class AdaptiveAgent:
         return normalized
 
     def _inline_code_input(self, code: str, stdin_value: Any) -> str:
-        """stdin을 지원하지 않는 code_execute에서 입력 alias를 안전하게 인라인합니다."""
+        """Inline stdin-style aliases for the current code_execute contract."""
 
         replacement = f"({stdin_value!r})"
         return code.replace("sys.stdin.read()", replacement).replace("input()", replacement)
@@ -442,7 +491,7 @@ class AdaptiveAgent:
         )
 
     def _looks_like_clarification_response(self, response: str) -> bool:
-        """LLM이 계획 대신 직접 추가정보 요청 문장을 낸 경우 HITL로 정규화합니다."""
+        """Detect direct clarification text that should route to HITL."""
 
         normalized = response.casefold()
         clarification_markers = (
@@ -483,7 +532,7 @@ class AdaptiveAgent:
         }
 
     def _build_prompt(self, task: str) -> str:
-        """LLM에 전달할 기본 지시문을 구성합니다."""
+        """Render the Plan Agent prompt with available tools and task text."""
 
         tools = [
             {
@@ -508,7 +557,7 @@ class AdaptiveAgent:
         error: str | None,
         output: Any,
     ) -> str:
-        """자가 수정용 프롬프트를 구성합니다."""
+        """Render the correction prompt for failed tool execution."""
 
         return self.prompt_loader.render(
             "correction.txt",
@@ -519,7 +568,7 @@ class AdaptiveAgent:
         )
 
     def _create_state(self) -> AgentState:
-        """현재 registry를 반영한 실행 상태를 만듭니다."""
+        """Create initial AgentState from the current tool registry."""
 
         return AgentState(
             available_tools=[

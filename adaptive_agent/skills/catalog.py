@@ -18,7 +18,7 @@ def _utc_now() -> str:
 
 @dataclass
 class SkillCatalog:
-    """`.adaptive_agent/tools/manifest.json`을 단일 스킬 인덱스로 관리합니다."""
+    """Manifest-backed index for approved generated tools."""
 
     tool_library: Path
     manifest_filename: str = MANIFEST_FILENAME
@@ -29,12 +29,12 @@ class SkillCatalog:
         return self.tool_library / self.manifest_filename
 
     def list(self) -> list[dict[str, Any]]:
-        """현재 manifest의 스킬 목록을 반환합니다."""
+        """Return approved tool metadata from the manifest."""
 
         return list(self._load().get("tools", []))
 
     def upsert(self, metadata: dict[str, Any]) -> dict[str, Any]:
-        """스킬 metadata를 기본 필드로 정규화한 뒤 이름 기준으로 추가/갱신합니다."""
+        """Insert or replace approved tool metadata by name."""
 
         normalized = self._normalize(metadata)
         payload = self._load()

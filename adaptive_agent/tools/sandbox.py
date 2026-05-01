@@ -74,12 +74,12 @@ _BLOCKED_SHELL_PATTERNS = (
 
 
 class SandboxPolicyViolation(ValueError):
-    """로컬 정책상 허용하지 않는 실행 요청입니다."""
+    """Execution request rejected by local sandbox policy."""
 
 
 @dataclass(frozen=True)
 class SandboxResult:
-    """별도 프로세스 실행 결과를 JSON 직렬화 가능한 dict로 변환합니다."""
+    """JSON-serializable process execution result."""
 
     command: str
     exit_code: int
@@ -110,7 +110,7 @@ class SandboxResult:
 
 
 class LocalSandboxBackend:
-    """표준 라이브러리만 사용하는 로컬 프로세스 샌드박스 백엔드입니다."""
+    """Local process sandbox implemented with the Python standard library."""
 
     name = "local_process"
 
@@ -118,7 +118,7 @@ class LocalSandboxBackend:
         self.workspace = (workspace or Path.cwd()).resolve()
 
     def run_python_code(self, code: str, *, timeout_seconds: float) -> dict[str, object]:
-        """Python 코드를 임시 디렉터리의 별도 인터프리터에서 실행합니다."""
+        """Run Python code in a temporary isolated interpreter process."""
 
         self._enforce_local_policy(code, kind="python")
         with tempfile.TemporaryDirectory(prefix="adaptive-agent-code-") as temp_dir:
@@ -134,7 +134,7 @@ class LocalSandboxBackend:
             )
 
     def run_shell(self, code: str, *, shell_binary: str, timeout_seconds: float) -> dict[str, object]:
-        """셸 코드를 임시 디렉터리의 별도 프로세스에서 실행합니다."""
+        """Run shell code in a temporary isolated process."""
 
         self._enforce_local_policy(code, kind="shell")
         with tempfile.TemporaryDirectory(prefix="adaptive-agent-shell-") as temp_dir:
@@ -147,7 +147,7 @@ class LocalSandboxBackend:
             )
 
     def run_workspace_command(self, command: str, *, timeout_seconds: float) -> dict[str, object]:
-        """워크스페이스 복사본에서 프로젝트 명령을 실행합니다."""
+        """Run a project command inside a temporary workspace copy."""
 
         self._enforce_local_policy(command, kind="workspace_command")
         with tempfile.TemporaryDirectory(prefix="adaptive-agent-workspace-") as temp_dir:
@@ -234,7 +234,7 @@ class LocalSandboxBackend:
         *,
         kind: str,
     ) -> None:
-        """컨테이너 없는 로컬 실행에서 실제 환경을 겨냥한 명령을 사전 차단합니다."""
+        """Reject payloads that target real local paths or unsafe commands."""
 
         if str(self.workspace) in payload:
             raise SandboxPolicyViolation("실제 워크스페이스 절대경로 접근은 로컬 정책상 차단됩니다.")

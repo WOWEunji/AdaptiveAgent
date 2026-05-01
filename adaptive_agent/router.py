@@ -5,12 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from adaptive_agent.nodes import PlanNode
 from adaptive_agent.state import AgentState
 
 
 @dataclass(frozen=True)
 class RouterDependencies:
-    """라우터가 기존 Agent core 기능을 호출하기 위한 최소 의존성입니다."""
+    """Injected callables required by StateMachineRouter."""
 
     create_state: Callable[[], AgentState]
     plan_with_llm: Callable[[str], dict[str, Any]]
@@ -19,14 +20,15 @@ class RouterDependencies:
 
 
 class StateMachineRouter:
-    """AgentState의 `next_node`를 기준으로 실행 흐름을 제어합니다."""
+    """State-machine boundary for one AdaptiveAgent execution."""
 
     def __init__(self, dependencies: RouterDependencies) -> None:
         self.dependencies = dependencies
+        self.plan_node = PlanNode(dependencies.plan_with_llm)
         self.last_state: AgentState | None = None
 
     def run(self, task: str) -> Any:
-        """현재 단일 계획 흐름을 명시적 라우터 경계 안에서 실행합니다."""
+        """Route one user task through the current plan-and-execute flow."""
 
         state = self.dependencies.create_state()
         self.last_state = state
@@ -47,7 +49,7 @@ class StateMachineRouter:
 
         state.append_message("user", task)
         try:
-            plan = self.dependencies.plan_with_llm(task)
+            node_result = self.plan_node.run(state)
         except Exception as exc:
             state.next_node = "error"
             state.failure_count += 1
@@ -61,14 +63,9 @@ class StateMachineRouter:
                 events=state.events,
             )
 
-        state.step_count += 1
-        state.current_plan = dict(plan)
-        validation_error = plan.pop("_validation_error", None)
-        if validation_error:
-            state.record_event("plan_validation_failed", reason=validation_error)
-        state.record_event("task_analyzed", action=plan.get("action", "respond"))
-
-        state.next_node = "execute" if plan.get("action") == "tool" else "done"
+        plan = node_result.details.get("plan", {})
+        if not isinstance(plan, dict):
+            plan = {}
         response = self.dependencies.run_normalized_plan(task, plan, state)
         if response is not None:
             state.next_node = "done"

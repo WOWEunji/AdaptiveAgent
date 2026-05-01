@@ -1,5 +1,7 @@
 # AdaptiveAgent 기초 아키텍처 설계
 
+큰 그림은 `docs/architecture_blueprint.md`에서 먼저 본다. 이 문서는 구현자가 참고하는 세부 설계, 데이터 구조, 단계별 구현 기준을 다룬다.
+
 ## 0. `.cursor` 요구사항 반영 메모
 
 이 설계는 작업 시작 전 확인한 `.cursor/rules/` 요구사항을 기준으로 작성한다.
@@ -11,6 +13,8 @@
 - API 키와 비밀값은 코드나 문서에 넣지 않는다.
 
 ## 1. 설계 이유와 목적
+
+큰 아키텍처 결정, 사용자 결정, 추가 요구사항, 회의록 성격의 기록은 `docs/architecture_decision_log.md`에 누적한다. 이 문서는 현재 구조와 세부 설계 기준을 설명한다.
 
 ### 설계 이유
 
@@ -39,9 +43,9 @@ AdaptiveAgent는 에이전트의 핵심 제어 흐름을 프로젝트 내부 코
 | --- | --- | --- | --- |
 | CLI | `adaptive_agent/cli.py` | 단일 자연어 task, 명시 툴 실행, JSON 출력 | HITL 입력 재요청, 저장 승인 플래그, 실행 이벤트 출력 |
 | Agent core | `adaptive_agent/agent.py` | 공개 실행 API와 LLM 계획/정규화 호환 계층 | 세부 노드 로직을 `StateMachineRouter`와 역할별 node로 더 이동 |
-| State router | `adaptive_agent/router.py` | `AgentState.next_node` 기반 실행 전이 경계 | `retrieve -> plan -> code -> execute -> critique -> approve -> store` 루프 확장 |
-| Node contract | `adaptive_agent/nodes/base.py` | Plan/Coder/Critic/Skill Agent 공통 인터페이스와 prompt 위치 규칙 | 역할별 node 구현 및 출력 검증 |
-| Prompt templates | `adaptive_agent/prompts/default/*.txt` | 하드코딩 지시문을 파일 기반 영어 prompt로 관리 | 역할별 prompt set 추가 |
+| State router | `adaptive_agent/router.py` | `PlanNode` 호출과 `AgentState.next_node` 기반 실행 전이 경계 | `retrieve -> plan -> code -> execute -> critique -> approve -> store` 루프 확장 |
+| Node contract | `adaptive_agent/nodes/base.py`, `adaptive_agent/nodes/plan.py`, `adaptive_agent/nodes/coder.py`, `adaptive_agent/nodes/critic.py` | Plan/Coder/Critic Agent 공통 인터페이스와 역할별 prompt 연결 | Coder/Critic node 실행 로직 및 출력 검증 |
+| Prompt templates | `adaptive_agent/prompts/default/*.txt` | Plan/Coder/Critic/correction 지시문을 파일 기반 영어 prompt로 관리 | 역할별 prompt set 추가 |
 | Config | `adaptive_agent/config.py` | env/.env 기반 provider와 작업 디렉터리 설정 | 샌드박스 timeout, env allowlist, 레지스트리 경로 정책 |
 | LLM adapters | `adaptive_agent/llms/` | provider별 최소 클라이언트 | provider 차이 격리, 구조화 응답 검증, 오류 메시지 표준화 |
 | Tool model | `adaptive_agent/tools/models.py` | `Tool`, `ToolExecutionResult` | `ToolSchema`, input/output schema, provenance, validation status |
@@ -86,10 +90,12 @@ AdaptiveAgent
   |           +-- Plan Agent
   |           +-- Coder Agent
   |           +-- Critic Agent
-  |           +-- Skill Agent
+  |           +-- SkillCatalog storage boundary
   |
   +-- PromptLoader
   |     +-- prompts/default/plan.txt
+  |     +-- prompts/default/coder.txt
+  |     +-- prompts/default/critic.txt
   |     +-- prompts/default/correction.txt
   |
   +-- Tool layer
@@ -159,9 +165,10 @@ LLM이 툴을 정확히 선택하고, 실행기가 입력을 검증하기 위한
    - Planner가 LLM에게 원문 task, 현재 툴 schema, 응답 JSON 계약을 전달한다.
 3. 분기
    - `clarification_requested`: 사용자 입력이 부족하면 CLI가 일시 정지하고 추가 입력을 받는다.
-   - `use_tool`: 기존 툴을 실행한다.
-   - `create_tool`: 새 툴 생성 파이프라인으로 이동한다.
-   - `final_answer`: 최종 응답을 만든다.
+   - `use_tool`: 기존 툴 실행 계약인 `tool`로 정규화한다.
+   - `create_tool`: `tool_create` 실행 계획으로 정규화한다.
+   - `approve_tool`: 검증된 툴을 `tool_approve` 실행 계획으로 정규화한다.
+   - `final_answer`: 기존 응답 계약인 `respond`로 정규화한다.
 4. `tool_executed` / `tool_result_observed`
    - 툴 실행 결과를 Observation으로 AgentState에 추가한다.
 5. 실패 시
@@ -252,7 +259,8 @@ LLM이 툴을 정확히 선택하고, 실행기가 입력을 검증하기 위한
 - [x] Agent 실행 이벤트 기록 구조 추가
 - [x] Blueprint 흐름용 `AgentState` 필드(`current_plan`, `generated_code`, `last_tool_result`, `reflections`, `next_node`) 추가
 - [x] `StateMachineRouter` 경계 추가
-- [ ] LLM 계획 JSON 계약을 `use_tool`, `create_tool`, `clarification_requested`, `final_answer`로 확장
+- [x] `PlanNode`를 라우터의 실제 계획 노드로 연결
+- [x] LLM 계획 JSON 계약을 `use_tool`, `create_tool`, `approve_tool`, `clarification_requested`, `final_answer`로 확장
 - [ ] `LLMClient` 메서드 명칭을 agent core와 일치하도록 정리
 
 ### Phase 2: 툴 schema와 레지스트리
