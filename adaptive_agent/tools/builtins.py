@@ -424,8 +424,19 @@ def tool_approve(arguments: dict[str, object], *, tool_library: Path) -> ToolExe
 
     metadata.update({"status": "approved", "approved": True, "approval_status": "approved"})
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    catalog_metadata = SkillCatalog(tool_library).upsert(metadata)
-    return ToolExecutionResult(success=True, output={"tool": metadata, "catalog": catalog_metadata})
+    catalog_diff = SkillCatalog(tool_library).upsert_with_diff(metadata)
+    return ToolExecutionResult(
+        success=True,
+        output={
+            "tool": metadata,
+            "catalog": catalog_diff["entry"],
+            "manifest_merge": {
+                "merged": catalog_diff["merged"],
+                "previous_usage_count": catalog_diff["previous_usage_count"],
+                "previous_failure_count": catalog_diff["previous_failure_count"],
+            },
+        },
+    )
 
 
 def tool_search(
