@@ -171,10 +171,17 @@ class SkillCatalog:
     def _normalize(self, metadata: dict[str, Any], *, use_existing: bool = True) -> dict[str, Any]:
         name = str(metadata.get("name") or "")
         existing = self._find_existing(name) if use_existing else {}
+        # 생성 도구 metadata는 R5 분류 (planning/functional/atomic) 중 하나여야
+        # 한다. 명시 안 되어 있으면 'functional'로 폴백 (대부분의 생성 도구는
+        # 도메인 효과를 만드는 functional skill).
+        raw_class = str(metadata.get("skill_class") or existing.get("skill_class") or "functional").lower()
+        if raw_class not in {"planning", "functional", "atomic"}:
+            raw_class = "functional"
         return {
             "name": name,
             "description": str(metadata.get("description") or existing.get("description") or ""),
             "category": str(metadata.get("category") or existing.get("category") or "generated"),
+            "skill_class": raw_class,
             "tags": _normalize_tags(metadata.get("tags") or existing.get("tags") or []),
             "file_path": str(metadata.get("file_path") or metadata.get("path") or existing.get("file_path") or ""),
             "file_hash": str(metadata.get("file_hash") or existing.get("file_hash") or ""),
