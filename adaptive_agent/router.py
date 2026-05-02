@@ -148,6 +148,27 @@ class StateMachineRouter:
     ) -> Any:
         state.next_node = "done" if state.next_node != "error" else "error"
         state.record_event("final_response_created", action=action)
+
+        # Aggregate LLM usage so callers (CLI, JSON consumer) see total spend
+        # without walking events. agent_state는 고급 필드라 dict 형태로 압축.
+        usage_summary: dict[str, Any] | None = None
+        records = getattr(state, "llm_usage_records", None)
+        if records:
+            from adaptive_agent.llms.usage import LLMUsage, aggregate_usage
+
+            normalized_records = [
+                LLMUsage(
+                    provider=r["provider"],
+                    model=r["model"],
+                    input_tokens=int(r.get("input_tokens", 0)),
+                    output_tokens=int(r.get("output_tokens", 0)),
+                    total_tokens=int(r.get("total_tokens", 0)),
+                    estimated_cost_usd=r.get("estimated_cost_usd"),
+                )
+                for r in records
+            ]
+            usage_summary = aggregate_usage(normalized_records)
+
         return self.dependencies.make_response(
             task=state.user_task,
             output=output,
@@ -156,4 +177,5 @@ class StateMachineRouter:
             events=state.events,
             session_id=state.session_id,
             pending=state.pending or None,
+            llm_usage_summary=usage_summary,
         )

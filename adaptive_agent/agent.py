@@ -9,6 +9,7 @@ from typing import Any
 from adaptive_agent.config import AgentConfig
 from adaptive_agent.llms.base import LLMClient
 from adaptive_agent.llms.factory import create_llm_client
+from adaptive_agent.llms.usage import LLMUsage, aggregate_usage
 from adaptive_agent.prompts import PromptLoader
 from adaptive_agent.router import RouterDependencies, StateMachineRouter
 from adaptive_agent.sessions import SessionStore
@@ -29,6 +30,7 @@ class AgentResponse:
     events: list[AgentEvent] = field(default_factory=list)
     session_id: str | None = None
     pending: dict[str, Any] | None = None
+    llm_usage_summary: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,30 @@ class AdaptiveAgent:
         """Return currently registered tools."""
 
         return self.registry.list()
+
+    def _record_llm_call(self, state: AgentState | None, *, purpose: str) -> None:
+        """Read llm_client.last_usage (set by provider) and accumulate on state.
+
+        Provider 클라이언트가 usage를 채우지 않으면 (stub LLM 등) 기록 없이
+        skip — 사용량 추적 자체가 best-effort.
+        """
+
+        if state is None:
+            return
+        usage = getattr(self.llm_client, "last_usage", None)
+        if usage is None:
+            return
+        record = {
+            "provider": usage.provider,
+            "model": usage.model,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens,
+            "estimated_cost_usd": usage.estimated_cost_usd,
+            "purpose": purpose,
+        }
+        state.llm_usage_records.append(record)
+        state.record_event("llm_call_recorded", **record)
 
     def run(self, task: str) -> AgentResponse:
         """Run one preserved user task through the state-machine router."""
@@ -479,6 +505,7 @@ class AdaptiveAgent:
         """Create a normalized plan with shared-state context."""
 
         response = self.llm_client.complete(self._build_prompt(state.user_task, state=state))
+        self._record_llm_call(state, purpose="plan")
         parsed = self._loads_plan_json(response)
 
         return self._normalize_plan(parsed, fallback_response=response)
@@ -514,6 +541,7 @@ class AdaptiveAgent:
                 ),
             )
         )
+        self._record_llm_call(state, purpose="code")
         try:
             parsed = self._loads_plan_json(response)
         except json.JSONDecodeError:
@@ -540,6 +568,9 @@ class AdaptiveAgent:
                 output=output,
             )
         )
+        # state는 호출자가 전달하지 않아 None — usage는 다음 plan/critique 사이클에
+        # 함께 잡힌다 (이번 호출 자체의 usage는 last_usage에 남아 있음).
+        self._record_llm_call(self.router.last_state, purpose="correction")
         try:
             parsed = self._loads_plan_json(response)
         except json.JSONDecodeError:
@@ -550,6 +581,7 @@ class AdaptiveAgent:
         """Create a normalized critique verdict from the latest execution state."""
 
         response = self.llm_client.complete(self._build_critic_prompt(state))
+        self._record_llm_call(state, purpose="critique")
         try:
             parsed = self._loads_plan_json(response)
         except json.JSONDecodeError:
