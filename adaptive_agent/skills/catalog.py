@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,6 +16,14 @@ SCHEMA_VERSION = 1
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+_STALE_REASONS = {
+    "missing_file": "manifest 항목이 가리키는 .py 파일이 없음",
+    "hash_mismatch": "파일 내용이 manifest의 file_hash와 일치하지 않음",
+    "missing_hash": "manifest에 file_hash가 없음 (legacy entry)",
+    "missing_path": "manifest 항목에 file_path가 없음",
+}
 
 
 @dataclass
@@ -64,6 +73,58 @@ class SkillCatalog:
         self.tool_library.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return normalized
+
+    def record_usage(self, name: str, *, success: bool) -> dict[str, Any] | None:
+        """Increment ``usage_count`` and (on failure) ``failure_count`` for ``name``.
+
+        Returns the updated metadata if the tool exists in the manifest, otherwise
+        ``None``. Missing tools are intentionally a no-op so that calling code
+        (e.g., the executor wired to *every* tool run) does not have to filter
+        out builtins or unregistered names beforehand.
+        """
+
+        existing = self._find_existing(name)
+        if not existing:
+            return None
+        existing["usage_count"] = int(existing.get("usage_count", 0)) + 1
+        if not success:
+            existing["failure_count"] = int(existing.get("failure_count", 0)) + 1
+        existing["updated_at"] = _utc_now()
+        return self.upsert(existing)
+
+    def find_stale_entries(self) -> list[dict[str, Any]]:
+        """Return manifest entries whose backing file is missing or tampered.
+
+        Each entry is ``{"name": ..., "reason": <code>, "detail": <message>}``.
+        ``reason`` codes:
+
+        - ``missing_path`` — manifest 항목에 file_path가 없음
+        - ``missing_file`` — manifest 항목이 가리키는 .py 파일이 없음
+        - ``missing_hash`` — manifest에 file_hash가 없음 (legacy entry)
+        - ``hash_mismatch`` — 파일 내용이 manifest의 file_hash와 일치하지 않음
+        """
+
+        stale: list[dict[str, Any]] = []
+        for tool in self.list():
+            name = str(tool.get("name") or "")
+            if not name:
+                continue
+            file_path = str(tool.get("file_path") or "")
+            if not file_path:
+                stale.append({"name": name, "reason": "missing_path", "detail": _STALE_REASONS["missing_path"]})
+                continue
+            path = Path(file_path)
+            if not path.exists():
+                stale.append({"name": name, "reason": "missing_file", "detail": _STALE_REASONS["missing_file"]})
+                continue
+            expected_hash = str(tool.get("file_hash") or "")
+            if not expected_hash:
+                stale.append({"name": name, "reason": "missing_hash", "detail": _STALE_REASONS["missing_hash"]})
+                continue
+            actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+            if actual_hash != expected_hash:
+                stale.append({"name": name, "reason": "hash_mismatch", "detail": _STALE_REASONS["hash_mismatch"]})
+        return stale
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():

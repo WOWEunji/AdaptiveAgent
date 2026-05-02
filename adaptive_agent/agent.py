@@ -12,6 +12,7 @@ from adaptive_agent.llms.factory import create_llm_client
 from adaptive_agent.prompts import PromptLoader
 from adaptive_agent.router import RouterDependencies, StateMachineRouter
 from adaptive_agent.sessions import SessionStore
+from adaptive_agent.skills import SkillCatalog
 from adaptive_agent.state import AgentEvent, AgentState, ToolSchema
 from adaptive_agent.tools.executor import ToolExecutor
 from adaptive_agent.tools.registry import ToolRegistry, create_default_registry
@@ -83,6 +84,7 @@ class AdaptiveAgent:
         self.executor = executor or ToolExecutor(self.registry)
         self.prompt_loader = prompt_loader or PromptLoader()
         self.session_store = SessionStore(self.config.session_dir)
+        self.skill_catalog = SkillCatalog(self.config.tool_library_dir)
         self.router = StateMachineRouter(
             RouterDependencies(
                 create_state=self._create_state,
@@ -91,6 +93,7 @@ class AdaptiveAgent:
                 critique_execution=self._critique_execution_with_llm,
                 retrieve_skills=self._retrieve_skills,
                 code_with_llm=self._code_with_llm,
+                skill_catalog=self.skill_catalog,
                 make_response=AgentResponse,
                 max_steps=self.config.max_router_steps,
             )
@@ -205,6 +208,7 @@ class AdaptiveAgent:
             "error": result.error,
         }
         self._record_tool_result(state, tool_name, result.success, result.error)
+        self._report_generated_tool_usage(tool_name, result.success, state)
 
         normalized_plan = {"action": "tool", "tool_name": tool_name, "arguments": arguments}
         if result.success:
@@ -432,6 +436,26 @@ class AdaptiveAgent:
             success=success,
             has_error=error is not None,
         )
+
+    def _report_generated_tool_usage(self, tool_name: str, success: bool, state: AgentState) -> None:
+        """Forward generated-tool execution stats to the librarian.
+
+        Builtin tools, missing names, and ad-hoc tools are intentionally
+        ignored (the catalog returns ``None`` for unknown names).
+        """
+
+        tool = self.registry.get(tool_name)
+        if tool is None or tool.source != "generated":
+            return
+        updated = self.router.librarian_agent.record_usage(tool_name, success=success)
+        if updated is not None:
+            state.record_event(
+                "generated_tool_usage_recorded",
+                tool_name=tool_name,
+                success=success,
+                usage_count=updated.get("usage_count"),
+                failure_count=updated.get("failure_count"),
+            )
 
     def _plan_with_llm(self, task: str) -> dict[str, Any]:
         """Create a normalized plan from the LLM response."""

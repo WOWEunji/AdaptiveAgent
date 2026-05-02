@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from adaptive_agent.agents import CoderAgent, CriticAgent, ExecutorAgent, LibrarianAgent, PlanAgent
+from adaptive_agent.skills import SkillCatalog
 from adaptive_agent.state import AgentState
 
 
@@ -20,6 +21,7 @@ class RouterDependencies:
     make_response: Callable[..., Any]
     retrieve_skills: Callable[[AgentState], list[dict[str, Any]]] | None = None
     code_with_llm: Callable[[AgentState], dict[str, Any]] | None = None
+    skill_catalog: SkillCatalog | None = None
     max_steps: int = 8
 
 
@@ -28,7 +30,10 @@ class StateMachineRouter:
 
     def __init__(self, dependencies: RouterDependencies) -> None:
         self.dependencies = dependencies
-        self.librarian_agent = LibrarianAgent(dependencies.retrieve_skills)
+        self.librarian_agent = LibrarianAgent(
+            dependencies.retrieve_skills,
+            catalog=dependencies.skill_catalog,
+        )
         self.plan_agent = PlanAgent(dependencies.plan_with_llm)
         self.coder_agent = CoderAgent(dependencies.code_with_llm)
         self.executor_agent = ExecutorAgent(dependencies.run_normalized_plan)
