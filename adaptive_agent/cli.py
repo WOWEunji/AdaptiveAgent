@@ -147,7 +147,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _parse_tool_args(raw_args: Sequence[str]) -> dict[str, object]:
-    """Parse key=value arguments for explicit tool execution."""
+    """Parse ``key=value`` arguments for explicit tool execution.
+
+    Values that look like JSON (start with ``{``/``[``/digit/``-``, or are
+    exactly ``true``/``false``/``null``) are JSON-decoded so that nested
+    structures (e.g. ``--arg sample_arguments={"x":7}``) reach the tool as
+    real ``dict``/``list``/number/bool/None instead of opaque strings.
+    Plain strings are kept as-is, preserving backwards compatibility.
+    """
 
     parsed: dict[str, object] = {}
     for raw_arg in raw_args:
@@ -155,8 +162,22 @@ def _parse_tool_args(raw_args: Sequence[str]) -> dict[str, object]:
         if not separator:
             parsed[raw_arg] = True
         else:
-            parsed[key] = value
+            parsed[key] = _coerce_arg_value(value)
     return parsed
+
+
+def _coerce_arg_value(value: str) -> object:
+    """Decode a CLI ``--arg`` value as JSON when it looks like JSON."""
+
+    stripped = value.strip()
+    if not stripped:
+        return value
+    if stripped in {"true", "false", "null"} or stripped[0] in "{[-0123456789":
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return value
+    return value
 
 
 def _print_result(result, as_json: bool, tool_name: str | None = None) -> None:

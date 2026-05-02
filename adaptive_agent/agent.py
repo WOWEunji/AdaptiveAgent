@@ -108,10 +108,41 @@ class AdaptiveAgent:
         """Run one preserved user task through the state-machine router."""
         return self.router.run(task)
 
-    def run_tool(self, tool_name: str, arguments: dict[str, Any]):
-        """Execute an explicitly named tool without natural-language planning."""
+    def run_tool(self, tool_name: str, arguments: dict[str, Any], *, _state: AgentState | None = None):
+        """Execute an explicitly named tool without natural-language planning.
 
-        return self.executor.run(tool_name, arguments)
+        Generated-tool usage stats are recorded once at this single entry
+        point so that the manifest's ``usage_count``/``failure_count`` reflect
+        every invocation — both direct ``--tool`` CLI calls and router-driven
+        executions. The optional ``_state`` is internal: when the router
+        path passes its :class:`AgentState`, this method also emits the
+        ``generated_tool_usage_recorded`` event for observability.
+        """
+
+        result = self.executor.run(tool_name, arguments)
+        self._maybe_record_generated_tool_usage(tool_name, result.success, _state)
+        return result
+
+    def _maybe_record_generated_tool_usage(
+        self,
+        tool_name: str,
+        success: bool,
+        state: AgentState | None = None,
+    ) -> None:
+        """Forward usage stats to the librarian for generated tools only."""
+
+        tool = self.registry.get(tool_name)
+        if tool is None or tool.source != "generated":
+            return
+        updated = self.router.librarian_agent.record_usage(tool_name, success=success)
+        if updated is not None and state is not None:
+            state.record_event(
+                "generated_tool_usage_recorded",
+                tool_name=tool_name,
+                success=success,
+                usage_count=updated.get("usage_count"),
+                failure_count=updated.get("failure_count"),
+            )
 
     def resume(self, session_id: str, *, user_input: str | None = None, approve: bool = False, reject: bool = False) -> AgentResponse:
         """Resume a pending HITL session with explicit user input or decision."""
@@ -201,14 +232,13 @@ class AdaptiveAgent:
         if retry_attempt is not None:
             state.record_event("tool_reexecuted", tool_name=tool_name, attempt=retry_attempt)
 
-        result = self.run_tool(tool_name, arguments)
+        result = self.run_tool(tool_name, arguments, _state=state)
         state.last_tool_result = {
             "success": result.success,
             "output": result.output,
             "error": result.error,
         }
         self._record_tool_result(state, tool_name, result.success, result.error)
-        self._report_generated_tool_usage(tool_name, result.success, state)
 
         normalized_plan = {"action": "tool", "tool_name": tool_name, "arguments": arguments}
         if result.success:
@@ -436,26 +466,6 @@ class AdaptiveAgent:
             success=success,
             has_error=error is not None,
         )
-
-    def _report_generated_tool_usage(self, tool_name: str, success: bool, state: AgentState) -> None:
-        """Forward generated-tool execution stats to the librarian.
-
-        Builtin tools, missing names, and ad-hoc tools are intentionally
-        ignored (the catalog returns ``None`` for unknown names).
-        """
-
-        tool = self.registry.get(tool_name)
-        if tool is None or tool.source != "generated":
-            return
-        updated = self.router.librarian_agent.record_usage(tool_name, success=success)
-        if updated is not None:
-            state.record_event(
-                "generated_tool_usage_recorded",
-                tool_name=tool_name,
-                success=success,
-                usage_count=updated.get("usage_count"),
-                failure_count=updated.get("failure_count"),
-            )
 
     def _plan_with_llm(self, task: str) -> dict[str, Any]:
         """Create a normalized plan from the LLM response."""
