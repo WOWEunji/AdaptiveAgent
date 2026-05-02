@@ -104,6 +104,43 @@ class AdaptiveAgent:
 
         return self.registry.list()
 
+    def run_perspectives(self, task: str, perspectives: list[str] | str) -> dict[str, AgentResponse]:
+        """Run ``task`` from multiple persona perspectives in parallel.
+
+        See :mod:`adaptive_agent.perspectives` for the available keys
+        (researcher / pm / architect / reviewer / qa). ``implementer`` is
+        intentionally rejected for parallel calls (write conflict risk).
+        """
+
+        from adaptive_agent.perspectives import (
+            _PerspectiveLLM,
+            resolve_perspective_keys,
+            run_perspectives_parallel,
+        )
+
+        keys = resolve_perspective_keys(perspectives)
+
+        def _build(_key: str, prefix: str) -> "AdaptiveAgent":
+            wrapped_llm = _PerspectiveLLM(self.llm_client, prefix)
+            # 각 perspective는 새 AdaptiveAgent 인스턴스. registry/sandbox는
+            # 무거우니 share 가능하지만 단순함을 위해 공유. router/state는
+            # 새로 만들어 격리.
+            return AdaptiveAgent(
+                config=self.config,
+                llm_client=wrapped_llm,
+                registry=self.registry,
+                executor=self.executor,
+                prompt_loader=self.prompt_loader,
+            )
+
+        return run_perspectives_parallel(
+            agent=self,
+            task=task,
+            perspectives=keys,
+            max_workers=self.config.max_parallel_perspectives,
+            build_per_perspective_agent=_build,
+        )
+
     def run(self, task: str) -> AgentResponse:
         """Run one preserved user task through the state-machine router."""
         return self.router.run(task)
