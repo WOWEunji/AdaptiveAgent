@@ -130,7 +130,22 @@ class SkillCatalog:
     def upsert(self, metadata: dict[str, Any]) -> dict[str, Any]:
         """Insert or replace approved tool metadata by name."""
 
+        result = self.upsert_with_diff(metadata)
+        return result["entry"]
+
+    def upsert_with_diff(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        """Upsert and return ``{entry, merged, previous_usage_count,
+        previous_failure_count}``.
+
+        ``merged`` is ``True`` iff an entry with the same ``name`` already
+        existed and was overwritten. Counter values are reported pre-merge so
+        callers can emit a structured ``manifest_entry_merged`` event without
+        needing to read the manifest twice.
+        """
+
         normalized = self._normalize(metadata)
+        existing = self._find_existing(normalized["name"])
+        merged = bool(existing)
         payload = self._load()
         tools = [tool for tool in payload.get("tools", []) if tool.get("name") != normalized["name"]]
         tools.append(normalized)
@@ -138,7 +153,12 @@ class SkillCatalog:
         payload["tools"] = sorted(tools, key=lambda item: str(item.get("name", "")))
         self.tool_library.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        return normalized
+        return {
+            "entry": normalized,
+            "merged": merged,
+            "previous_usage_count": int(existing.get("usage_count", 0)) if existing else 0,
+            "previous_failure_count": int(existing.get("failure_count", 0)) if existing else 0,
+        }
 
     def record_usage(self, name: str, *, success: bool) -> dict[str, Any] | None:
         """Increment ``usage_count`` and (on failure) ``failure_count`` for ``name``.
@@ -217,10 +237,17 @@ class SkillCatalog:
     def _normalize(self, metadata: dict[str, Any], *, use_existing: bool = True) -> dict[str, Any]:
         name = str(metadata.get("name") or "")
         existing = self._find_existing(name) if use_existing else {}
+        # 생성 도구 metadata는 R5 분류 (planning/functional/atomic) 중 하나여야
+        # 한다. 명시 안 되어 있으면 'functional'로 폴백 (대부분의 생성 도구는
+        # 도메인 효과를 만드는 functional skill).
+        raw_class = str(metadata.get("skill_class") or existing.get("skill_class") or "functional").lower()
+        if raw_class not in {"planning", "functional", "atomic"}:
+            raw_class = "functional"
         return {
             "name": name,
             "description": str(metadata.get("description") or existing.get("description") or ""),
             "category": str(metadata.get("category") or existing.get("category") or "generated"),
+            "skill_class": raw_class,
             "tags": _normalize_tags(metadata.get("tags") or existing.get("tags") or []),
             "file_path": str(metadata.get("file_path") or metadata.get("path") or existing.get("file_path") or ""),
             "file_hash": str(metadata.get("file_hash") or existing.get("file_hash") or ""),
