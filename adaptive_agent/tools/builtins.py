@@ -424,7 +424,25 @@ def tool_approve(arguments: dict[str, object], *, tool_library: Path) -> ToolExe
 
     metadata.update({"status": "approved", "approved": True, "approval_status": "approved"})
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    catalog_metadata = SkillCatalog(tool_library).upsert(metadata)
+    catalog = SkillCatalog(tool_library)
+    catalog_metadata = catalog.upsert(metadata)
+
+    # Best-effort embedding: tool_approve가 embedder를 받지 않으면 skip.
+    # 실제 wiring은 registry에서 수행 (embedder 주입).
+    embedder = arguments.get("_embedder")
+    if embedder is not None:
+        text_for_embedding = f"{catalog_metadata.get('name', '')}\n{catalog_metadata.get('description', '')}"
+        try:
+            vector = embedder.embed(text_for_embedding)  # type: ignore[union-attr]
+        except Exception:
+            vector = None
+        if vector:
+            embedding_model = getattr(embedder, "model_id", "")
+            catalog_metadata = catalog.attach_embedding(
+                str(catalog_metadata.get("name") or ""),
+                vector,
+                embedding_model=embedding_model,
+            ) or catalog_metadata
     return ToolExecutionResult(success=True, output={"tool": metadata, "catalog": catalog_metadata})
 
 
@@ -433,14 +451,27 @@ def tool_search(
     *,
     registered_tools: list[dict[str, Any]],
     tool_library: Path,
+    embedder: object | None = None,
+    embedding_threshold: float = 0.4,
 ) -> ToolExecutionResult:
-    """Search registered and approved generated-tool metadata."""
+    """Search registered and approved generated-tool metadata.
+
+    ``mode`` argument: ``keyword`` (default) / ``semantic`` / ``auto``.
+    ``auto``는 embedder가 주입되었을 때만 semantic, 아니면 keyword로 폴백.
+    """
 
     query = str(arguments.get("query") or "").casefold()
     top_k = _coerce_int(arguments.get("top_k"), default=10, minimum=1, maximum=50)
-    generated_tools = SkillCatalog(tool_library).search(query, top_k=top_k)
+    mode = str(arguments.get("mode") or "keyword").lower().strip()
+    generated_tools = SkillCatalog(tool_library).search(
+        query,
+        top_k=top_k,
+        mode=mode,
+        embedder=embedder,
+        threshold=embedding_threshold,
+    )
     candidates = _dedupe_tool_candidates(registered_tools + generated_tools)
-    if query:
+    if query and mode in {"keyword", "auto"} and not (mode == "auto" and embedder is not None):
         candidates = [
             tool
             for tool in candidates
@@ -449,7 +480,10 @@ def tool_search(
             or query in str(tool.get("category", "")).casefold()
             or float(tool.get("score", 0) or 0) > 0
         ]
-    return ToolExecutionResult(success=True, output={"query": query, "top_k": top_k, "matches": candidates[:top_k]})
+    return ToolExecutionResult(
+        success=True,
+        output={"query": query, "top_k": top_k, "mode": mode, "matches": candidates[:top_k]},
+    )
 
 
 def memory_read(arguments: dict[str, object], *, memory_dir: Path) -> ToolExecutionResult:

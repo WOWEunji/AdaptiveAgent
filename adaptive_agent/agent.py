@@ -77,9 +77,17 @@ class AdaptiveAgent:
     ) -> None:
         self.config = config or AgentConfig.from_env()
         self.llm_client = llm_client or create_llm_client(self.config)
+        from adaptive_agent.skills.embedding import create_embedder
+
+        self._embedder = create_embedder(
+            self.config.embedding_provider,
+            model_id=self.config.embedding_model or None,
+        )
         self.registry = registry or create_default_registry(
             self.config.workspace_dir,
             tool_library_dir=self.config.tool_library_dir,
+            embedder=self._embedder,
+            embedding_threshold=self.config.embedding_threshold,
         )
         self.executor = executor or ToolExecutor(self.registry)
         self.prompt_loader = prompt_loader or PromptLoader()

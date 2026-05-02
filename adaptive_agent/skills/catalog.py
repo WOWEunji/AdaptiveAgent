@@ -43,8 +43,31 @@ class SkillCatalog:
 
         return list(self._load().get("tools", []))
 
-    def search(self, query: str, *, top_k: int = 5) -> list[dict[str, Any]]:
-        """Return ranked approved tool metadata for a query."""
+    def search(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        mode: str = "keyword",
+        embedder: object | None = None,
+        threshold: float = 0.4,
+    ) -> list[dict[str, Any]]:
+        """Return ranked approved tool metadata for a query.
+
+        ``mode`` options:
+        - ``keyword`` (default): token weighted ranking (existing behavior).
+        - ``semantic``: cosine similarity against stored embeddings; entries
+          without an embedding (or with model mismatch) are skipped. Requires
+          an ``embedder`` instance.
+        - ``auto``: semantic when an embedder is provided, else keyword.
+        """
+
+        normalized_mode = mode.lower().strip()
+        if normalized_mode == "auto":
+            normalized_mode = "semantic" if embedder is not None else "keyword"
+
+        if normalized_mode == "semantic":
+            return self._search_semantic(query, top_k=top_k, embedder=embedder, threshold=threshold)
 
         query_tokens = _tokens(query)
         ranked: list[dict[str, Any]] = []
@@ -60,6 +83,49 @@ class SkillCatalog:
             ranked.append({**tool, "score": score})
         ranked.sort(key=lambda item: (-float(item.get("score", 0)), str(item.get("name", ""))))
         return ranked[: max(top_k, 0)]
+
+    def _search_semantic(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        embedder: object | None,
+        threshold: float,
+    ) -> list[dict[str, Any]]:
+        from adaptive_agent.skills.embedding import cosine_similarity
+
+        if embedder is None:
+            return []
+        query_vec = embedder.embed(query)  # type: ignore[union-attr]
+        if not query_vec:
+            return []
+        active_model = getattr(embedder, "model_id", "")
+        scored: list[dict[str, Any]] = []
+        for tool in self.list():
+            name = str(tool.get("name") or "")
+            if not name:
+                continue
+            entry_vec = tool.get("embedding")
+            entry_model = str(tool.get("embedding_model") or "")
+            if not isinstance(entry_vec, list) or entry_model != active_model:
+                continue
+            score = cosine_similarity([float(x) for x in query_vec], [float(x) for x in entry_vec])
+            if score < threshold:
+                continue
+            scored.append({**tool, "score": score})
+        scored.sort(key=lambda item: (-float(item.get("score", 0)), str(item.get("name", ""))))
+        return scored[: max(top_k, 0)]
+
+    def attach_embedding(self, name: str, vector: list[float], *, embedding_model: str) -> dict[str, Any] | None:
+        """Persist an embedding vector against a manifest entry by name."""
+
+        existing = self._find_existing(name)
+        if not existing:
+            return None
+        existing["embedding"] = list(vector)
+        existing["embedding_model"] = embedding_model
+        existing["updated_at"] = _utc_now()
+        return self.upsert(existing)
 
     def upsert(self, metadata: dict[str, Any]) -> dict[str, Any]:
         """Insert or replace approved tool metadata by name."""
@@ -171,6 +237,16 @@ class SkillCatalog:
                 or ("approved" if metadata.get("approved") is True else "")
                 or existing.get("approval_status")
                 or "unapproved"
+            ),
+            "embedding": (
+                metadata.get("embedding")
+                if isinstance(metadata.get("embedding"), list)
+                else existing.get("embedding")
+            ),
+            "embedding_model": str(
+                metadata.get("embedding_model")
+                or existing.get("embedding_model")
+                or ""
             ),
             "created_at": str(metadata.get("created_at") or existing.get("created_at") or _utc_now()),
             "updated_at": str(metadata.get("updated_at") or _utc_now()),
