@@ -18,6 +18,18 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _parse_iso8601(text: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp written by ``_utc_now`` (or compatible)."""
+
+    if not text:
+        return None
+    candidate = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class SessionStore:
     """Store and load minimal pending HITL session snapshots."""
@@ -75,6 +87,74 @@ class SessionStore:
         payload["status"] = status
         payload["updated_at"] = _utc_now()
         self._path_for(session_id).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def cleanup_expired(
+        self,
+        *,
+        max_age_days: int = 30,
+        max_count: int = 100,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Delete session snapshots that exceed TTL or count cap.
+
+        Both rules apply (deletion happens if *either* condition is met):
+
+        - TTL: ``updated_at`` older than ``max_age_days`` from ``now`` (UTC).
+        - Cap: keep at most ``max_count`` most-recently-updated sessions.
+
+        Returns ``{"deleted": [session_ids...], "reasons": {sid: "ttl"|"cap"}}``.
+        Sessions in ``pending`` state are *not* spared — long-abandoned pending
+        flows are real garbage too. Files that fail to parse are also deleted
+        (treated as corrupt) and logged as ``corrupt``.
+        """
+
+        now = now or datetime.now(timezone.utc)
+        if not self.sessions_dir.exists():
+            return {"deleted": [], "reasons": {}}
+
+        entries: list[tuple[Path, datetime, str]] = []
+        deleted: list[str] = []
+        reasons: dict[str, str] = {}
+        for path in self.sessions_dir.glob("*.json"):
+            session_id = path.stem
+            if not _SESSION_ID_PATTERN.match(session_id):
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                updated_at = _parse_iso8601(str(payload.get("updated_at") or payload.get("created_at") or ""))
+            except (OSError, json.JSONDecodeError, ValueError):
+                path.unlink(missing_ok=True)
+                deleted.append(session_id)
+                reasons[session_id] = "corrupt"
+                continue
+            if updated_at is None:
+                # No timestamp — treat as ancient, prune.
+                path.unlink(missing_ok=True)
+                deleted.append(session_id)
+                reasons[session_id] = "ttl"
+                continue
+            entries.append((path, updated_at, session_id))
+
+        # Apply TTL.
+        ttl_threshold = now.timestamp() - max_age_days * 86400
+        survivors: list[tuple[Path, datetime, str]] = []
+        for path, updated_at, session_id in entries:
+            if updated_at.timestamp() < ttl_threshold:
+                path.unlink(missing_ok=True)
+                deleted.append(session_id)
+                reasons[session_id] = "ttl"
+            else:
+                survivors.append((path, updated_at, session_id))
+
+        # Apply count cap on what's left, oldest first.
+        if len(survivors) > max_count:
+            survivors.sort(key=lambda item: item[1])
+            for path, _updated_at, session_id in survivors[: len(survivors) - max_count]:
+                path.unlink(missing_ok=True)
+                deleted.append(session_id)
+                reasons[session_id] = "cap"
+
+        return {"deleted": deleted, "reasons": reasons}
 
     def _path_for(self, session_id: str) -> Path:
         if not _SESSION_ID_PATTERN.match(session_id):

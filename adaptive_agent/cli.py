@@ -76,6 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "자연어 task의 LLM 응답을 stdout에 streaming. plan/JSON 흐름을 "
             "건너뛰고 직접 LLM 응답을 chunk로 받음 (디버깅·체크에 유용)."
+        "--perspectives",
+        default=None,
+        help=(
+            "콤마 구분 페르소나 키 (예: r,p,a 또는 researcher,pm,architect). "
+            "지정 시 task를 각 페르소나별로 병렬 실행하고 결과를 묶어서 반환. "
+            "implementer는 거부됨."
         ),
     )
     return parser
@@ -159,6 +165,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception as exc:
             print(f"\nstream 실패: {exc}")
             return 1
+    if args.perspectives:
+        try:
+            results = agent.run_perspectives(task, args.perspectives)
+        except ValueError as exc:
+            if args.json:
+                print(json.dumps({"success": False, "error": str(exc), "action": "perspective_error"}, ensure_ascii=False, indent=2))
+            else:
+                print(f"perspective 실행 실패: {exc}")
+            return 1
+        if args.json:
+            payload = {
+                key: _result_to_dict(response)
+                for key, response in results.items()
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            for key, response in results.items():
+                print(f"\n=== [{key}] ===")
+                _print_result(response, as_json=False)
         return 0
 
     result = agent.run(task)

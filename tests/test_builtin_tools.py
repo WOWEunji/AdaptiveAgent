@@ -502,12 +502,16 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertEqual(read_result.output["value"], "한국어")
 
     def test_suggest_builtin_tools_includes_remaining_candidates(self) -> None:
+        # artifact_store / web_fetch는 이제 실제 builtin이라 후보 목록에서 빠지고
+        # 다음 확장 후보(artifact_search / mcp_bridge)로 교체됨.
         result = self.run_tool("suggest_builtin_tools", {})
 
         self.assertTrue(result.success)
         names = {candidate["name"] for candidate in result.output}
-        self.assertIn("artifact_store", names)
-        self.assertIn("web_fetch", names)
+        self.assertGreater(len(names), 0, "최소 한 개의 후보가 있어야 함")
+        # 이미 구현된 도구는 후보로 다시 노출되면 안 됨
+        registered = {tool.name for tool in self.registry.list()}
+        self.assertFalse(names & registered, "이미 등록된 도구는 후보에 들어가지 않아야 함")
 
 
 if __name__ == "__main__":

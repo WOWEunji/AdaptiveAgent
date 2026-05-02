@@ -79,11 +79,13 @@ class OpenAIClient:
     def __init__(self, model: str, *, api_key: str | None = None) -> None:
         self._model = model
         self._api_key = validate_openai_api_key(api_key or os.getenv("OPENAI_API_KEY"))
+        self.last_usage: "LLMUsage | None" = None
 
     def generate(self, prompt: str) -> str:
         from openai import APIError, OpenAI
 
         client = OpenAI(api_key=self._api_key)
+        self.last_usage = None
         try:
             if should_use_openai_responses_api(self._model):
                 try:
@@ -102,11 +104,13 @@ class OpenAIClient:
                         input=prompt,
                         max_output_tokens=2048,
                     )
+                self._capture_usage(response)
                 return (response.output_text or "").strip()
             response = client.chat.completions.create(
                 model=self._model,
                 messages=[{"role": "user", "content": prompt}],
             )
+            self._capture_usage(response)
             choice = response.choices[0].message.content
             return (choice if choice is not None else "").strip()
         except APIError as e:
@@ -119,6 +123,28 @@ class OpenAIClient:
             if formatted:
                 raise ValueError(formatted) from e
             raise
+
+    def _capture_usage(self, response: object) -> None:
+        from adaptive_agent.llms.usage import LLMUsage
+
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        # Responses API: input_tokens / output_tokens
+        # Chat Completions: prompt_tokens / completion_tokens
+        input_tokens = int(
+            getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None) or 0
+        )
+        output_tokens = int(
+            getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None) or 0
+        )
+        if input_tokens or output_tokens:
+            self.last_usage = LLMUsage.from_counts(
+                provider="openai",
+                model=self._model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
 
     def complete(self, prompt: str) -> str:
         """Compatibility completion method used by the agent core."""

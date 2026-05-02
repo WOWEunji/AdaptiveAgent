@@ -40,6 +40,7 @@ class GeminiClient:
     def __init__(self, model: str, *, api_key: str | None = None) -> None:
         self._model = model
         self._api_key = validate_gemini_api_key(_resolve_api_key(api_key))
+        self.last_usage: "LLMUsage | None" = None
 
     def complete(self, prompt: str) -> str:
         """Compatibility completion method used by the agent core."""
@@ -54,7 +55,10 @@ class GeminiClient:
     def generate(self, prompt: str) -> str:
         from google import genai
 
+        from adaptive_agent.llms.usage import LLMUsage
+
         client = genai.Client(api_key=self._api_key)
+        self.last_usage = None
         try:
             response = client.models.generate_content(
                 model=self._model,
@@ -67,6 +71,18 @@ class GeminiClient:
                 f"원본: {e}"
             )
             raise ValueError(msg) from e
+
+        usage_metadata = getattr(response, "usage_metadata", None)
+        if usage_metadata is not None:
+            input_tokens = int(getattr(usage_metadata, "prompt_token_count", None) or 0)
+            output_tokens = int(getattr(usage_metadata, "candidates_token_count", None) or 0)
+            if input_tokens or output_tokens:
+                self.last_usage = LLMUsage.from_counts(
+                    provider="gemini",
+                    model=self._model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
 
         text = getattr(response, "text", None)
         if text:
