@@ -1,4 +1,4 @@
-"""Shared contracts for AdaptiveAgent role nodes."""
+"""Shared contracts for role-specific AdaptiveAgent agents."""
 
 from __future__ import annotations
 
@@ -9,30 +9,32 @@ from adaptive_agent.state import AgentState, NodeName
 
 
 @dataclass(frozen=True)
-class NodeResult:
-    """Standard node result used by the router for state transitions."""
+class AgentResult:
+    """Standard result returned by a role agent."""
 
     next_node: NodeName
     status: str = "ok"
     details: dict[str, object] = field(default_factory=dict)
 
 
-class AgentNode(Protocol):
-    """Minimum interface for role-specific agent nodes."""
+class AgentRole(Protocol):
+    """Minimum interface for a role-specific agent."""
 
     name: NodeName
+    role: str
     prompt_set: str
     prompt_template: str
 
-    def run(self, state: AgentState) -> NodeResult:
+    def run(self, state: AgentState) -> AgentResult:
         """Read and mutate shared AgentState, then return the next node."""
 
 
 @dataclass
-class BaseAgentNode:
-    """Base node with prompt location metadata."""
+class BaseRoleAgent:
+    """Base role agent with prompt location metadata."""
 
     name: NodeName
+    role: str
     prompt_template: str
     prompt_set: str = "default"
 

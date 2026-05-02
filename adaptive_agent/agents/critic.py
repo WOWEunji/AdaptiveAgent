@@ -1,24 +1,24 @@
-"""Critic agent node implementation."""
+"""Critic role agent implementation."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
 
-from adaptive_agent.nodes.base import BaseAgentNode, NodeResult
+from adaptive_agent.agents.base import AgentResult, BaseRoleAgent
 from adaptive_agent.state import AgentState, NodeName
 
 
-class CriticNode(BaseAgentNode):
-    """Node that evaluates the latest execution observation."""
+class CriticAgent(BaseRoleAgent):
+    """Agent that evaluates the latest execution observation."""
 
     critic: Callable[[AgentState], dict[str, Any]]
 
     def __init__(self, critic: Callable[[AgentState], dict[str, Any]] | None = None) -> None:
-        super().__init__(name="critique", prompt_template="critic.txt")
+        super().__init__(name="critique", role="critic", prompt_template="critic.txt")
         self.critic = critic or _default_critic
 
-    def run(self, state: AgentState) -> NodeResult:
+    def run(self, state: AgentState) -> AgentResult:
         """Classify execution outcome and choose the next node."""
 
         verdict = self.critic(state)
@@ -31,11 +31,12 @@ class CriticNode(BaseAgentNode):
         state.next_node = next_node
         state.record_event(
             "execution_critiqued",
+            agent_role=self.role,
             verdict=normalized_verdict,
             next_node=next_node,
             has_reflection=bool(reflection),
         )
-        return NodeResult(next_node=next_node, details={"critique": verdict})
+        return AgentResult(next_node=next_node, details={"critique": verdict})
 
 
 def _default_critic(state: AgentState) -> dict[str, Any]:

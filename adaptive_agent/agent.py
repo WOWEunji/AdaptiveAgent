@@ -11,6 +11,8 @@ from adaptive_agent.llms.base import LLMClient
 from adaptive_agent.llms.factory import create_llm_client
 from adaptive_agent.prompts import PromptLoader
 from adaptive_agent.router import RouterDependencies, StateMachineRouter
+from adaptive_agent.sessions import SessionStore
+from adaptive_agent.skills import SkillCatalog
 from adaptive_agent.state import AgentEvent, AgentState, ToolSchema
 from adaptive_agent.tools.executor import ToolExecutor
 from adaptive_agent.tools.registry import ToolRegistry, create_default_registry
@@ -25,6 +27,26 @@ class AgentResponse:
     tool_name: str | None = None
     action: str = "respond"
     events: list[AgentEvent] = field(default_factory=list)
+    session_id: str | None = None
+    pending: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _ToolAttemptOutcome:
+    """One tool execution result + the data the retry loop needs to continue.
+
+    ``response`` is the terminal :class:`AgentResponse` (when success follow-up
+    short-circuited), or ``None`` when the router should keep going.
+    ``last_*`` fields capture the inputs/observations of this attempt and are
+    fed into the next correction prompt on failure.
+    """
+
+    success: bool
+    response: AgentResponse | None
+    last_plan: dict[str, Any]
+    last_error: str | None
+    last_output: Any
+    tool_name: str
 
 
 _VALID_PLAN_ACTIONS = {"tool", "respond"}
@@ -61,12 +83,17 @@ class AdaptiveAgent:
         )
         self.executor = executor or ToolExecutor(self.registry)
         self.prompt_loader = prompt_loader or PromptLoader()
+        self.session_store = SessionStore(self.config.session_dir)
+        self.skill_catalog = SkillCatalog(self.config.tool_library_dir)
         self.router = StateMachineRouter(
             RouterDependencies(
                 create_state=self._create_state,
-                plan_with_llm=self._plan_with_llm,
+                plan_with_llm=self._plan_with_state,
                 run_normalized_plan=self._run_normalized_plan,
                 critique_execution=self._critique_execution_with_llm,
+                retrieve_skills=self._retrieve_skills,
+                code_with_llm=self._code_with_llm,
+                skill_catalog=self.skill_catalog,
                 make_response=AgentResponse,
                 max_steps=self.config.max_router_steps,
             )
@@ -81,10 +108,81 @@ class AdaptiveAgent:
         """Run one preserved user task through the state-machine router."""
         return self.router.run(task)
 
-    def run_tool(self, tool_name: str, arguments: dict[str, Any]):
-        """Execute an explicitly named tool without natural-language planning."""
+    def run_tool(self, tool_name: str, arguments: dict[str, Any], *, _state: AgentState | None = None):
+        """Execute an explicitly named tool without natural-language planning.
 
-        return self.executor.run(tool_name, arguments)
+        Generated-tool usage stats are recorded once at this single entry
+        point so that the manifest's ``usage_count``/``failure_count`` reflect
+        every invocation — both direct ``--tool`` CLI calls and router-driven
+        executions. The optional ``_state`` is internal: when the router
+        path passes its :class:`AgentState`, this method also emits the
+        ``generated_tool_usage_recorded`` event for observability.
+        """
+
+        result = self.executor.run(tool_name, arguments)
+        self._maybe_record_generated_tool_usage(tool_name, result.success, _state)
+        return result
+
+    def _maybe_record_generated_tool_usage(
+        self,
+        tool_name: str,
+        success: bool,
+        state: AgentState | None = None,
+    ) -> None:
+        """Forward usage stats to the librarian for generated tools only."""
+
+        tool = self.registry.get(tool_name)
+        if tool is None or tool.source != "generated":
+            return
+        updated = self.router.librarian_agent.record_usage(tool_name, success=success)
+        if updated is not None and state is not None:
+            state.record_event(
+                "generated_tool_usage_recorded",
+                tool_name=tool_name,
+                success=success,
+                usage_count=updated.get("usage_count"),
+                failure_count=updated.get("failure_count"),
+            )
+
+    def resume(self, session_id: str, *, user_input: str | None = None, approve: bool = False, reject: bool = False) -> AgentResponse:
+        """Resume a pending HITL session with explicit user input or decision."""
+
+        snapshot = self.session_store.load_pending(session_id)
+        if reject:
+            self.session_store.close(session_id, "rejected")
+            return AgentResponse(
+                task=str(snapshot.get("user_task") or ""),
+                output="세션 요청을 거부했습니다.",
+                action="rejected",
+                session_id=session_id,
+            )
+        state = self._create_state()
+        state.session_id = session_id
+        state.user_task = str(snapshot.get("user_task") or "")
+        state.current_plan = snapshot.get("current_plan") if isinstance(snapshot.get("current_plan"), dict) else {}
+        state.last_tool_name = str(snapshot.get("last_tool_name") or "") or None
+        state.last_tool_arguments = (
+            snapshot.get("last_tool_arguments") if isinstance(snapshot.get("last_tool_arguments"), dict) else {}
+        )
+        state.last_tool_result = (
+            snapshot.get("last_tool_result") if isinstance(snapshot.get("last_tool_result"), dict) else None
+        )
+        state.reflections = snapshot.get("reflections") if isinstance(snapshot.get("reflections"), list) else []
+        if approve and isinstance(snapshot.get("resume_plan"), dict) and snapshot["resume_plan"].get("action") == "tool":
+            state.current_plan = dict(snapshot["resume_plan"])
+            state.next_node = "execute"
+        else:
+            resumed_text = user_input if user_input is not None else ("approved" if approve else "")
+            if resumed_text:
+                state.append_message("user", resumed_text)
+                state.user_task = f"{state.user_task}\n\nAdditional user input: {resumed_text}"
+            state.next_node = "retrieve"
+        state.record_event("session_resumed", session_id=session_id, approved=approve, has_input=user_input is not None)
+        response = self.router.run_state(state)
+        approval_resume = approve and isinstance(snapshot.get("resume_plan"), dict) and snapshot["resume_plan"].get("action") == "tool"
+        if self._resume_completed_successfully(response) and (not approval_resume or response.action == "tool"):
+            self.session_store.close(session_id, "completed")
+        return response
 
     def _run_normalized_plan(
         self,
@@ -92,10 +190,36 @@ class AdaptiveAgent:
         plan: dict[str, Any],
         state: AgentState,
     ) -> AgentResponse | None:
-        """Execute a normalized tool plan with bounded self-correction."""
+        """Execute a normalized tool plan with bounded self-correction.
+
+        First attempt + (optional) bounded retry loop. Each individual tool
+        execution is delegated to :meth:`_execute_normalized_tool`; the retry
+        loop lives in :meth:`_run_self_correction_loop`.
+        """
 
         if plan.get("action") != "tool":
             return None
+
+        outcome = self._execute_normalized_tool(task, plan, state)
+        if outcome.success:
+            return outcome.response
+
+        return self._run_self_correction_loop(task=task, last_outcome=outcome, state=state)
+
+    def _execute_normalized_tool(
+        self,
+        task: str,
+        plan: dict[str, Any],
+        state: AgentState,
+        *,
+        retry_attempt: int | None = None,
+    ) -> "_ToolAttemptOutcome":
+        """Execute a single normalized ``tool`` plan and record events.
+
+        On success delegates follow-up routing to
+        :meth:`_handle_successful_tool_result`; the returned response is either
+        an :class:`AgentResponse` (terminal) or ``None`` (router continues).
+        """
 
         tool_name = str(plan.get("tool_name") or "")
         arguments = self._normalized_arguments(plan)
@@ -105,34 +229,60 @@ class AdaptiveAgent:
         if isinstance(code, str):
             state.generated_code = code
         self._record_tool_spec(state, tool_name, arguments)
-        result = self.run_tool(tool_name, arguments)
+        if retry_attempt is not None:
+            state.record_event("tool_reexecuted", tool_name=tool_name, attempt=retry_attempt)
+
+        result = self.run_tool(tool_name, arguments, _state=state)
         state.last_tool_result = {
             "success": result.success,
             "output": result.output,
             "error": result.error,
         }
         self._record_tool_result(state, tool_name, result.success, result.error)
+
+        normalized_plan = {"action": "tool", "tool_name": tool_name, "arguments": arguments}
         if result.success:
-            if tool_name in {"ask_human", "propose_actions"}:
-                state.next_node = "approve"
-                state.record_event("final_response_created", action="tool")
-                return AgentResponse(
-                    task=task,
-                    output=result.output,
-                    tool_name=tool_name,
-                    action="tool",
-                    events=state.events,
-                )
-            state.next_node = "critique"
-            return None
+            response = self._handle_successful_tool_result(task, tool_name, result.output, state)
+            return _ToolAttemptOutcome(
+                success=True,
+                response=response,
+                last_plan=normalized_plan,
+                last_error=result.error,
+                last_output=result.output,
+                tool_name=tool_name,
+            )
 
         state.failure_count += 1
         state.error_log = str(result.error or "")
         state.reflections.append(f"tool_execution_error:{tool_name}:{result.error}")
         state.record_event("failure_classified", reason="tool_execution_error")
-        current_plan = {"action": "tool", "tool_name": tool_name, "arguments": arguments}
-        current_error = result.error
-        current_output = result.output
+        return _ToolAttemptOutcome(
+            success=False,
+            response=None,
+            last_plan=normalized_plan,
+            last_error=result.error,
+            last_output=result.output,
+            tool_name=tool_name,
+        )
+
+    def _run_self_correction_loop(
+        self,
+        *,
+        task: str,
+        last_outcome: "_ToolAttemptOutcome",
+        state: AgentState,
+    ) -> AgentResponse:
+        """Replan and re-execute up to ``max_self_corrections`` times.
+
+        Returns either a final ``tool_error`` response (loop exhausted or
+        provider failure) or the corrected plan's terminal response.
+        """
+
+        current_plan = last_outcome.last_plan
+        current_error = last_outcome.last_error
+        current_output = last_outcome.last_output
+        tool_name = last_outcome.tool_name
+
         for attempt in range(1, self.config.max_self_corrections + 1):
             state.record_event(
                 "self_correction_started",
@@ -157,7 +307,10 @@ class AdaptiveAgent:
                 state.record_event("plan_validation_failed", reason=validation_error)
             if corrected_plan.get("action") != "tool":
                 if corrected_plan.get("needs_user_input"):
-                    state.record_event("clarification_requested", reason="self_correction_requested_user_input")
+                    state.record_event(
+                        "clarification_requested",
+                        reason="self_correction_requested_user_input",
+                    )
                 state.record_event("final_response_created", action="llm")
                 return AgentResponse(
                     task=task,
@@ -166,42 +319,22 @@ class AdaptiveAgent:
                     events=state.events,
                 )
 
-            tool_name = str(corrected_plan.get("tool_name") or "")
-            arguments = self._normalized_arguments(corrected_plan)
-            state.last_tool_name = tool_name
-            state.last_tool_arguments = dict(arguments)
-            code = arguments.get("code")
-            if isinstance(code, str):
-                state.generated_code = code
-            self._record_tool_spec(state, tool_name, arguments)
-            state.record_event("tool_reexecuted", tool_name=tool_name, attempt=attempt)
-            result = self.run_tool(tool_name, arguments)
-            state.last_tool_result = {
-                "success": result.success,
-                "output": result.output,
-                "error": result.error,
-            }
-            self._record_tool_result(state, tool_name, result.success, result.error)
-            if result.success:
-                if tool_name in {"ask_human", "propose_actions"}:
-                    state.next_node = "approve"
-                    state.record_event("final_response_created", action="tool")
-                    return AgentResponse(
-                        task=task,
-                        output=result.output,
-                        tool_name=tool_name,
-                        action="tool",
-                        events=state.events,
-                    )
-                state.next_node = "critique"
-                return None
-            state.failure_count += 1
-            state.error_log = str(result.error or "")
-            state.reflections.append(f"tool_execution_error:{tool_name}:{result.error}")
-            state.record_event("failure_classified", reason="tool_execution_error")
-            current_plan = {"action": "tool", "tool_name": tool_name, "arguments": arguments}
-            current_error = result.error
-            current_output = result.output
+            outcome = self._execute_normalized_tool(
+                task,
+                corrected_plan,
+                state,
+                retry_attempt=attempt,
+            )
+            if outcome.success:
+                # Successful retry — return whatever follow-up routing produced
+                # (None means the router should continue, which the caller of
+                # ``_run_normalized_plan`` propagates faithfully).
+                return outcome.response  # type: ignore[return-value]
+
+            current_plan = outcome.last_plan
+            current_error = outcome.last_error
+            current_output = outcome.last_output
+            tool_name = outcome.tool_name
 
         state.record_event("final_response_created", action="tool_error")
         state.next_node = "error"
@@ -211,7 +344,96 @@ class AdaptiveAgent:
             tool_name=tool_name,
             action="tool_error",
             events=state.events,
+            session_id=state.session_id,
         )
+
+    def _handle_successful_tool_result(
+        self,
+        task: str,
+        tool_name: str,
+        output: Any,
+        state: AgentState,
+    ) -> AgentResponse | None:
+        """Apply follow-up routing for successful tool executions."""
+
+        if tool_name == "tool_create" and isinstance(output, dict):
+            tool_name_from_output = str(output.get("name") or "")
+            state.current_plan = {
+                "action": "tool",
+                "tool_name": "tool_validate",
+                "arguments": {"name": tool_name_from_output},
+            }
+            state.next_node = "execute"
+            state.record_event("generated_tool_created", tool_name=tool_name_from_output)
+            return None
+        if tool_name == "tool_validate" and isinstance(output, dict):
+            generated_tool = output.get("tool")
+            generated_name = ""
+            if isinstance(generated_tool, dict):
+                generated_name = str(generated_tool.get("name") or "")
+            approval_output = {
+                "status": "approval_required",
+                "plan": {"action": "approve_tool", "name": generated_name},
+                "risk_level": "high",
+                "approved": False,
+            }
+            state.next_node = "approve"
+            pending = self._save_pending_session(
+                state,
+                approval_output,
+                resume_plan={"action": "tool", "tool_name": "tool_approve", "arguments": {"name": generated_name}},
+            )
+            state.record_event("generated_tool_validation_pending_approval", tool_name=generated_name)
+            state.record_event("final_response_created", action="approval_required")
+            return AgentResponse(
+                task=task,
+                output=approval_output,
+                tool_name=tool_name,
+                action="approval_required",
+                events=state.events,
+                session_id=state.session_id,
+                pending=pending,
+            )
+        if tool_name in {"ask_human", "propose_actions"}:
+            state.next_node = "approve"
+            pending = self._save_pending_session(state, output)
+            state.record_event("final_response_created", action="tool")
+            return AgentResponse(
+                task=task,
+                output=output,
+                tool_name=tool_name,
+                action="tool",
+                events=state.events,
+                session_id=state.session_id,
+                pending=pending,
+            )
+        state.next_node = "critique"
+        return None
+
+    def _resume_completed_successfully(self, response: AgentResponse) -> bool:
+        action = str(getattr(response, "action", ""))
+        pending = getattr(response, "pending", None)
+        if isinstance(pending, dict) and pending.get("status") == "pending":
+            return False
+        return action not in {"approval_required", "tool_error", "llm_error", "router_error", "critic_error", "error"}
+
+    def _save_pending_session(
+        self,
+        state: AgentState,
+        output: Any,
+        *,
+        resume_plan: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        pending = self.session_store.save_pending(state, output, resume_plan=resume_plan)
+        state.pending = pending
+        state.session_status = "pending"
+        state.record_event(
+            "session_pending_saved",
+            session_id=state.session_id,
+            pending_type=pending.get("pending_type"),
+            cleanup_hint=f"rm {self.config.session_dir / (state.session_id + '.json')}",
+        )
+        return pending
 
     def _normalized_arguments(self, plan: dict[str, Any]) -> dict[str, Any]:
         arguments = plan.get("arguments")
@@ -252,6 +474,53 @@ class AdaptiveAgent:
         parsed = self._loads_plan_json(response)
 
         return self._normalize_plan(parsed, fallback_response=response)
+
+    def _plan_with_state(self, state: AgentState) -> dict[str, Any]:
+        """Create a normalized plan with shared-state context."""
+
+        response = self.llm_client.complete(self._build_prompt(state.user_task, state=state))
+        parsed = self._loads_plan_json(response)
+
+        return self._normalize_plan(parsed, fallback_response=response)
+
+    def _retrieve_skills(self, state: AgentState) -> list[dict[str, Any]]:
+        """Retrieve reusable skill hints for planning."""
+
+        search_tool = self.registry.get("tool_search")
+        if search_tool is None:
+            return []
+        result = search_tool.handler({"query": state.user_task, "top_k": 5})
+        if not result.success or not isinstance(result.output, dict):
+            return []
+        matches = result.output.get("matches")
+        return matches if isinstance(matches, list) else []
+
+    def _code_with_llm(self, state: AgentState) -> dict[str, Any]:
+        """Create generated-tool code from the Coder Agent prompt."""
+
+        response = self.llm_client.complete(
+            self.prompt_loader.render(
+                "coder.txt",
+                plan=json.dumps(state.current_plan, ensure_ascii=False, default=str),
+                task=state.user_task,
+                observations=json.dumps(
+                    {
+                        "last_tool_result": state.last_tool_result,
+                        "error_log": state.error_log,
+                        "reflections": state.reflections,
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
+        )
+        try:
+            parsed = self._loads_plan_json(response)
+        except json.JSONDecodeError:
+            parsed = response
+        if not isinstance(parsed, dict):
+            return {"code": str(response)}
+        return parsed
 
     def _plan_correction_with_llm(
         self,
@@ -591,7 +860,7 @@ class AdaptiveAgent:
             "arguments": {"questions": question},
         }
 
-    def _build_prompt(self, task: str) -> str:
+    def _build_prompt(self, task: str, *, state: AgentState | None = None) -> str:
         """Render the Plan Agent prompt with available tools and task text."""
 
         tools = [
@@ -607,6 +876,9 @@ class AdaptiveAgent:
             "plan.txt",
             available_tools=json.dumps(tools, ensure_ascii=False),
             task=task,
+            retrieved_skills=json.dumps(state.retrieved_skills if state else [], ensure_ascii=False, default=str),
+            reflections=json.dumps(state.reflections if state else [], ensure_ascii=False, default=str),
+            last_tool_result=json.dumps(state.last_tool_result if state else None, ensure_ascii=False, default=str),
         )
 
     def _build_correction_prompt(
@@ -647,9 +919,11 @@ class AdaptiveAgent:
                 ToolSchema(
                     name=tool.name,
                     description=tool.description,
+                    parameters=tool.parameters or {},
+                    returns=tool.returns or {},
                     safety_level=tool.safety_level,
-                    source="builtin",
-                    validation_status="passed",
+                    source=tool.source,
+                    validation_status=tool.validation_status,
                 )
                 for tool in self.registry.list()
             ]

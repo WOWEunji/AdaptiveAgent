@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -84,6 +85,7 @@ class BuiltinToolsTest(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertTrue(result.output["verdict"]["policy_blocked"])
+        self.assertEqual(result.output["verdict"]["block_reason"], "workspace_path")
         self.assertFalse((self.workspace / "leak.txt").exists())
 
     def test_shell_run_blocks_destructive_patterns(self) -> None:
@@ -91,13 +93,50 @@ class BuiltinToolsTest(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertTrue(result.output["verdict"]["policy_blocked"])
+        self.assertEqual(result.output["verdict"]["block_reason"], "dangerous_shell_pattern")
 
     def test_shell_run_blocks_unquoted_sensitive_absolute_paths(self) -> None:
         result = self.run_tool("shell_run", {"code": "cat /etc/passwd"})
 
         self.assertFalse(result.success)
         self.assertTrue(result.output["verdict"]["policy_blocked"])
-        self.assertIn("/etc", result.error)
+        self.assertEqual(result.output["verdict"]["block_reason"], "sensitive_absolute_path")
+
+    def test_policy_block_reason_covers_known_categories(self) -> None:
+        cases = [
+            (
+                "workspace_path",
+                "code_execute",
+                {"code": f"open({str(self.workspace / 'a.txt')!r}, 'w').write('x')"},
+            ),
+            (
+                "dangerous_shell_pattern",
+                "shell_run",
+                {"code": "rm -rf x"},
+            ),
+            (
+                "sensitive_absolute_path",
+                "shell_run",
+                {"code": "cat /etc/hostname"},
+            ),
+            (
+                "sensitive_absolute_path",
+                "code_execute",
+                {"code": "open('/root/secret', 'r').read()"},
+            ),
+            (
+                "dangerous_shell_pattern",
+                "shell_run",
+                {"code": "sudo apt-get update"},
+            ),
+        ]
+        for expected_reason, tool_name, arguments in cases:
+            with self.subTest(reason=expected_reason, tool=tool_name):
+                result = self.run_tool(tool_name, arguments)
+                self.assertFalse(result.success)
+                verdict = result.output["verdict"]
+                self.assertTrue(verdict["policy_blocked"])
+                self.assertEqual(verdict["block_reason"], expected_reason)
 
     def test_file_read_and_write_stay_inside_workspace(self) -> None:
         write_result = self.run_tool("file_write", {"path": "notes/hello.txt", "content": "안녕"})
@@ -192,6 +231,7 @@ class BuiltinToolsTest(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertTrue(result.output["verdict"]["policy_blocked"])
+        self.assertEqual(result.output["verdict"]["block_reason"], "workspace_path")
         self.assertFalse((self.workspace / "created.txt").exists())
 
     def test_test_run_skips_workspace_symlinks(self) -> None:
@@ -283,6 +323,123 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertTrue((self.workspace / ".adaptive_agent" / "tools" / MANIFEST_FILENAME).exists())
         self.assertIn("hello_tool", {match["name"] for match in search_result.output["matches"]})
 
+    def test_approved_generated_tool_loads_and_runs_in_new_registry(self) -> None:
+        self.run_tool(
+            "tool_create",
+            {
+                "name": "hello_tool",
+                "description": "Greets a user",
+                "code": "def run(arguments):\n    return {'hello': arguments.get('name')}\n",
+            },
+        )
+        self.run_tool(
+            "tool_validate",
+            {
+                "name": "hello_tool",
+                "sample_arguments": {"name": "Ada"},
+                "expected_output": '"hello": "Ada"',
+            },
+        )
+        self.run_tool("tool_approve", {"name": "hello_tool"})
+
+        registry = create_default_registry(self.workspace)
+        tool = registry.get("hello_tool")
+        self.assertIsNotNone(tool)
+        result = tool.handler({"name": "Ada"})  # type: ignore[union-attr]
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output["result"], {"hello": "Ada"})
+        self.assertEqual(result.output["execution"]["exit_code"], 0)
+
+    def test_generated_tool_manifest_mismatch_is_not_loaded(self) -> None:
+        self.run_tool(
+            "tool_create",
+            {
+                "name": "missing_file_tool",
+                "description": "Will lose its file",
+                "code": "def run(arguments):\n    return {'ok': True}\n",
+            },
+        )
+        self.run_tool("tool_validate", {"name": "missing_file_tool"})
+        self.run_tool("tool_approve", {"name": "missing_file_tool"})
+        (self.workspace / ".adaptive_agent" / "tools" / "missing_file_tool.py").unlink()
+
+        registry = create_default_registry(self.workspace)
+
+        self.assertIsNone(registry.get("missing_file_tool"))
+        self.assertEqual(
+            registry.generated_load_results,
+            [{"name": "missing_file_tool", "loaded": False, "reason": "missing_generated_tool_file"}],
+        )
+
+    def test_generated_tool_file_hash_mismatch_is_not_loaded(self) -> None:
+        self.run_tool(
+            "tool_create",
+            {
+                "name": "changed_file_tool",
+                "description": "Will be modified after approval",
+                "code": "def run(arguments):\n    return {'ok': True}\n",
+            },
+        )
+        self.run_tool("tool_validate", {"name": "changed_file_tool"})
+        self.run_tool("tool_approve", {"name": "changed_file_tool"})
+        (self.workspace / ".adaptive_agent" / "tools" / "changed_file_tool.py").write_text(
+            "def run(arguments):\n    return {'changed': True}\n",
+            encoding="utf-8",
+        )
+
+        registry = create_default_registry(self.workspace)
+
+        self.assertIsNone(registry.get("changed_file_tool"))
+        self.assertEqual(
+            registry.generated_load_results,
+            [{"name": "changed_file_tool", "loaded": False, "reason": "generated_tool_file_hash_mismatch"}],
+        )
+
+    def test_generated_tool_manifest_without_file_hash_is_not_loaded(self) -> None:
+        self.run_tool(
+            "tool_create",
+            {
+                "name": "legacy_hashless_tool",
+                "description": "Approved before hash metadata existed",
+                "code": "def run(arguments):\n    return {'ok': True}\n",
+            },
+        )
+        self.run_tool("tool_validate", {"name": "legacy_hashless_tool"})
+        self.run_tool("tool_approve", {"name": "legacy_hashless_tool"})
+        manifest_path = self.workspace / ".adaptive_agent" / "tools" / MANIFEST_FILENAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["tools"][0].pop("file_hash", None)
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        registry = create_default_registry(self.workspace)
+
+        self.assertIsNone(registry.get("legacy_hashless_tool"))
+        self.assertEqual(
+            registry.generated_load_results,
+            [{"name": "legacy_hashless_tool", "loaded": False, "reason": "missing_generated_tool_file_hash"}],
+        )
+
+    def test_tool_approve_rejects_file_changed_after_validation(self) -> None:
+        self.run_tool(
+            "tool_create",
+            {
+                "name": "changed_before_approval_tool",
+                "description": "Will change before approval",
+                "code": "def run(arguments):\n    return {'ok': True}\n",
+            },
+        )
+        self.run_tool("tool_validate", {"name": "changed_before_approval_tool"})
+        (self.workspace / ".adaptive_agent" / "tools" / "changed_before_approval_tool.py").write_text(
+            "def run(arguments):\n    return {'changed': True}\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_tool("tool_approve", {"name": "changed_before_approval_tool"})
+
+        self.assertFalse(result.success)
+        self.assertIn("검증 이후 생성 툴 파일이 변경", result.error)
+
     def test_tool_approve_rejects_unvalidated_tool(self) -> None:
         self.run_tool(
             "tool_create",
@@ -318,6 +475,7 @@ class BuiltinToolsTest(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertTrue(result.output["verdict"]["policy_blocked"])
+        self.assertEqual(result.output["verdict"]["block_reason"], "workspace_path")
         self.assertFalse((self.workspace / "side_effect.txt").exists())
 
     def test_tool_search_finds_builtin_tools(self) -> None:
@@ -327,6 +485,13 @@ class BuiltinToolsTest(unittest.TestCase):
         names = {match["name"] for match in result.output["matches"]}
         self.assertIn("file_read", names)
         self.assertIn("file_write", names)
+
+    def test_tool_search_applies_top_k_and_dedupes(self) -> None:
+        result = self.run_tool("tool_search", {"query": "file", "top_k": "1"})
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.output["matches"]), 1)
+        self.assertEqual(result.output["top_k"], 1)
 
     def test_memory_read_and_write_store_structured_values(self) -> None:
         write_result = self.run_tool("memory_write", {"key": "preference", "value": "한국어"})

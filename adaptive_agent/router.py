@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from adaptive_agent.nodes import CriticNode, ExecuteNode, PlanNode
+from adaptive_agent.agents import CoderAgent, CriticAgent, ExecutorAgent, LibrarianAgent, PlanAgent
+from adaptive_agent.skills import SkillCatalog
 from adaptive_agent.state import AgentState
 
 
@@ -14,10 +15,13 @@ class RouterDependencies:
     """Injected callables required by StateMachineRouter."""
 
     create_state: Callable[[], AgentState]
-    plan_with_llm: Callable[[str], dict[str, Any]]
+    plan_with_llm: Callable[[AgentState], dict[str, Any]]
     run_normalized_plan: Callable[[str, dict[str, Any], AgentState], Any]
     critique_execution: Callable[[AgentState], dict[str, Any]]
     make_response: Callable[..., Any]
+    retrieve_skills: Callable[[AgentState], list[dict[str, Any]]] | None = None
+    code_with_llm: Callable[[AgentState], dict[str, Any]] | None = None
+    skill_catalog: SkillCatalog | None = None
     max_steps: int = 8
 
 
@@ -26,9 +30,14 @@ class StateMachineRouter:
 
     def __init__(self, dependencies: RouterDependencies) -> None:
         self.dependencies = dependencies
-        self.plan_node = PlanNode(dependencies.plan_with_llm)
-        self.execute_node = ExecuteNode(dependencies.run_normalized_plan)
-        self.critic_node = CriticNode(dependencies.critique_execution)
+        self.librarian_agent = LibrarianAgent(
+            dependencies.retrieve_skills,
+            catalog=dependencies.skill_catalog,
+        )
+        self.plan_agent = PlanAgent(dependencies.plan_with_llm)
+        self.coder_agent = CoderAgent(dependencies.code_with_llm)
+        self.executor_agent = ExecutorAgent(dependencies.run_normalized_plan)
+        self.critic_agent = CriticAgent(dependencies.critique_execution)
         self.last_state: AgentState | None = None
 
     def run(self, task: str) -> Any:
@@ -37,7 +46,7 @@ class StateMachineRouter:
         state = self.dependencies.create_state()
         self.last_state = state
         state.user_task = task
-        state.next_node = "plan"
+        state.next_node = "retrieve"
         state.record_event("task_received", task=task)
 
         if task == "":
@@ -45,6 +54,12 @@ class StateMachineRouter:
             return self._final_response(state, output="작업 내용을 입력해 주세요.", action="input_required")
 
         state.append_message("user", task)
+        return self.run_state(state)
+
+    def run_state(self, state: AgentState) -> Any:
+        """Continue routing an existing state."""
+
+        self.last_state = state
 
         for _step in range(self.dependencies.max_steps):
             try:
@@ -65,21 +80,29 @@ class StateMachineRouter:
         return self._final_response(state, output="라우터 실행 단계 한도를 초과했습니다.", action="router_error")
 
     def _run_next_node(self, state: AgentState) -> Any | None:
+        if state.next_node == "retrieve":
+            self.librarian_agent.run(state)
+            return None
+
         if state.next_node == "plan":
-            self.plan_node.run(state)
+            self.plan_agent.run(state)
             if state.next_node in {"done", "approve"}:
                 return self._response_from_current_plan(state)
             return None
 
+        if state.next_node == "code":
+            self.coder_agent.run(state)
+            return None
+
         if state.next_node == "execute":
-            node_result = self.execute_node.run(state)
+            node_result = self.executor_agent.run(state)
             response = node_result.details.get("response")
             if response is not None:
                 return response
             return None
 
         if state.next_node == "critique":
-            self.critic_node.run(state)
+            self.critic_agent.run(state)
             if state.next_node == "done":
                 return self._tool_response_from_state(state)
             if state.next_node == "approve":
@@ -131,4 +154,6 @@ class StateMachineRouter:
             tool_name=tool_name,
             action=action,
             events=state.events,
+            session_id=state.session_id,
+            pending=state.pending or None,
         )

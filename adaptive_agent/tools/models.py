@@ -17,6 +17,10 @@ class Tool:
     requires_llm: bool = False
     safety_level: str = "low"
     usage: str = ""
+    source: str = "builtin"
+    parameters: dict[str, Any] | None = None
+    returns: dict[str, Any] | None = None
+    validation_status: str = "unverified"
 
 
 @dataclass(frozen=True)

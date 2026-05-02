@@ -37,6 +37,21 @@ class CliTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn('"name": "list_files"', buffer.getvalue())
 
+    def test_resume_error_is_user_friendly(self) -> None:
+        buffer = io.StringIO()
+        session_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        underlying_message = "pending 상태의 세션만 재개할 수 있습니다"
+        with patch("adaptive_agent.cli.AdaptiveAgent") as agent_class, redirect_stdout(buffer):
+            agent_class.return_value.resume.side_effect = ValueError(underlying_message)
+
+            exit_code = main(["--resume", session_id, "--input", "ok"])
+
+        # 사용자에게 노출되는 라벨 문구는 자유 영역 — 구조적 계약만 검증
+        self.assertEqual(exit_code, 1)
+        output = buffer.getvalue()
+        self.assertIn(session_id, output, "어떤 세션이 실패했는지 식별 가능해야 합니다")
+        self.assertIn(underlying_message, output, "원인 메시지가 사용자에게 전달되어야 합니다")
+
     def test_natural_language_task_keeps_original_spacing(self) -> None:
         buffer = io.StringIO()
         with patch("adaptive_agent.cli.AdaptiveAgent") as agent_class, redirect_stdout(buffer):
@@ -61,6 +76,30 @@ class CliTest(unittest.TestCase):
         error_buffer = io.StringIO()
         with redirect_stderr(error_buffer), self.assertRaises(SystemExit):
             main(["원문", "분리"])
+
+    def test_arg_values_that_look_like_json_are_decoded(self) -> None:
+        # 핵심 회귀: --arg key={...} 가 dict로 디코드되어야 generated tool
+        # validate / 중첩 인자가 있는 builtin들이 CLI로도 정상 작동한다.
+        from adaptive_agent.cli import _parse_tool_args
+
+        cases = [
+            ("dict", "sample_arguments={\"x\":7}", "sample_arguments", {"x": 7}),
+            ("list", "questions=[\"q1\",\"q2\"]", "questions", ["q1", "q2"]),
+            ("int", "top_k=5", "top_k", 5),
+            ("negative int", "n=-3", "n", -3),
+            ("bool true", "overwrite=true", "overwrite", True),
+            ("bool false", "dry_run=false", "dry_run", False),
+            ("null", "value=null", "value", None),
+            ("plain string stays string", "task=hello world", "task", "hello world"),
+            ("string starting with letter stays string", "name=tool_42", "name", "tool_42"),
+            ("malformed JSON falls back to string", "broken={oops", "broken", "{oops"),
+            ("flag-only key gets True", "verbose", "verbose", True),
+        ]
+        for label, raw, expected_key, expected_value in cases:
+            with self.subTest(case=label):
+                parsed = _parse_tool_args([raw])
+                self.assertIn(expected_key, parsed)
+                self.assertEqual(parsed[expected_key], expected_value)
 
 
 if __name__ == "__main__":

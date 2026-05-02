@@ -43,4 +43,7 @@ For reusable tool creation, use:
 {"action":"tool","tool_name":"tool_create","arguments":{"name":"<snake_case_name>","description":"<what it does>","code":"def run(arguments): ..."}}
 
 Available tools: {available_tools}
+Retrieved skills: {retrieved_skills}
+Prior reflections: {reflections}
+Latest tool result: {last_tool_result}
 Original user task: {task}

@@ -74,7 +74,17 @@ _BLOCKED_SHELL_PATTERNS = (
 
 
 class SandboxPolicyViolation(ValueError):
-    """Execution request rejected by local sandbox policy."""
+    """Execution request rejected by local sandbox policy.
+
+    The ``reason`` attribute carries a stable machine-readable identifier
+    (one of ``workspace_path`` / ``sensitive_absolute_path`` /
+    ``dangerous_shell_pattern``) so callers can branch without parsing the
+    user-facing message.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -115,7 +125,9 @@ class LocalSandboxBackend:
     name = "local_process"
 
     def __init__(self, workspace: Path | None = None) -> None:
-        self.workspace = (workspace or Path.cwd()).resolve()
+        raw_workspace = workspace or Path.cwd()
+        self.workspace = raw_workspace.resolve()
+        self._workspace_aliases = {str(self.workspace), str(raw_workspace)}
 
     def run_python_code(self, code: str, *, timeout_seconds: float) -> dict[str, object]:
         """Run Python code in a temporary isolated interpreter process."""
@@ -236,21 +248,30 @@ class LocalSandboxBackend:
     ) -> None:
         """Reject payloads that target real local paths or unsafe commands."""
 
-        if str(self.workspace) in payload:
-            raise SandboxPolicyViolation("실제 워크스페이스 절대경로 접근은 로컬 정책상 차단됩니다.")
+        if any(alias in payload for alias in self._workspace_aliases):
+            raise SandboxPolicyViolation(
+                "실제 워크스페이스 절대경로 접근은 로컬 정책상 차단됩니다.",
+                reason="workspace_path",
+            )
 
         for prefix in _BLOCKED_ABSOLUTE_PREFIXES:
-            if prefix == str(self.workspace):
+            if prefix in self._workspace_aliases:
                 continue
             pattern = rf"(?<![A-Za-z0-9_.-]){re.escape(prefix)}(?:/|\b)"
             if re.search(pattern, payload):
-                raise SandboxPolicyViolation(f"민감한 절대경로 접근은 로컬 정책상 차단됩니다: {prefix}")
+                raise SandboxPolicyViolation(
+                    f"민감한 절대경로 접근은 로컬 정책상 차단됩니다: {prefix}",
+                    reason="sensitive_absolute_path",
+                )
 
         if kind in {"shell", "workspace_command"}:
             normalized = f" {payload.strip()} ".lower()
             for pattern in _BLOCKED_SHELL_PATTERNS:
                 if pattern in normalized:
-                    raise SandboxPolicyViolation(f"위험한 shell 패턴이 차단되었습니다: {pattern.strip()}")
+                    raise SandboxPolicyViolation(
+                        f"위험한 shell 패턴이 차단되었습니다: {pattern.strip()}",
+                        reason="dangerous_shell_pattern",
+                    )
 
 
 def _decode_timeout_output(value: bytes | str | None) -> str:

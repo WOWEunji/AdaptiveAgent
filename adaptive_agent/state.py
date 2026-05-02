@@ -66,6 +66,8 @@ class AgentState:
     reflections: list[str] = field(default_factory=list)
     next_node: NodeName = "plan"
     approval: dict[str, Any] = field(default_factory=dict)
+    pending: dict[str, Any] = field(default_factory=dict)
+    session_status: str = "running"
     failure_count: int = 0
     summary: str = ""
 

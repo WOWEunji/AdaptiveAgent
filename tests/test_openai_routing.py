@@ -18,8 +18,18 @@ class OpenAIRoutingTest(unittest.TestCase):
         self.assertFalse(should_use_openai_responses_api("gpt-4.1-nano"))
 
     def test_validate_openai_api_key_rejects_placeholder(self) -> None:
-        with self.assertRaisesRegex(ValueError, "예시"):
-            validate_openai_api_key("your_openai_key_here")
+        placeholders = [
+            "your_openai_key_here",
+            "your-api-key",
+            "changeme",
+            "placeholder",
+            "paste_here",
+            "sk-test",
+        ]
+        for placeholder in placeholders:
+            with self.subTest(placeholder=placeholder):
+                with self.assertRaises(ValueError):
+                    validate_openai_api_key(placeholder)
 
     def test_validate_openai_api_key_accepts_sk_prefix(self) -> None:
         key = "sk-" + "a" * 45

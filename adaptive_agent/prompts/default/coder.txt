@@ -33,3 +33,8 @@ QUALITY BAR
 OUTPUT
 - Return only raw JSON describing the generated tool, with no Markdown fences:
 {"code":"def run(arguments): ...","description":"<what the tool does>","parameters":{},"returns":{}}
+
+CONTEXT
+Original user task: {task}
+Current plan: {plan}
+Observed context: {observations}

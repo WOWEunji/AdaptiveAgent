@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import unittest
+import tempfile
+from pathlib import Path
 
+from adaptive_agent.agents import CoderAgent, CriticAgent, ExecutorAgent, LibrarianAgent, PlanAgent
 from adaptive_agent.agent import AdaptiveAgent
 from adaptive_agent.config import AgentConfig
-from adaptive_agent.nodes import CoderNode, CriticNode
 from adaptive_agent.prompts import PromptLoader
 from adaptive_agent.router import StateMachineRouter
 
@@ -63,13 +66,15 @@ class AdaptiveAgentTest(unittest.TestCase):
 
         result = agent.run("")
 
-        self.assertEqual(result.output, "작업 내용을 입력해 주세요.")
+        self.assertEqual(result.action, "input_required")
         self.assertIsNone(result.tool_name)
-        self.assertEqual([event.name for event in result.events], [
-            "task_received",
-            "clarification_requested",
-            "final_response_created",
-        ])
+        self.assertTrue(str(result.output).strip(), "clarification 메시지는 비어있지 않아야 합니다")
+        event_names = {event.name for event in result.events}
+        for required in {"task_received", "clarification_requested", "final_response_created"}:
+            self.assertIn(required, event_names)
+        clarification_events = [e for e in result.events if e.name == "clarification_requested"]
+        self.assertTrue(clarification_events, "clarification_requested 이벤트가 있어야 합니다")
+        self.assertEqual(clarification_events[0].details.get("reason"), "empty_task")
 
     def test_whitespace_task_is_preserved_for_llm(self) -> None:
         llm = StubLLM()
@@ -87,8 +92,9 @@ class AdaptiveAgentTest(unittest.TestCase):
 
         result = agent.run("echo 안녕하세요")
 
-        self.assertEqual(result.output, "LLM 응답")
+        self.assertEqual(result.action, "llm")
         self.assertIsNone(result.tool_name)
+        self.assertEqual(len(llm.prompts), 1, "툴 매칭 없이 LLM이 정확히 한 번 호출되어야 합니다")
         self.assertIn("echo 안녕하세요", llm.prompts[0])
 
     def test_llm_error_returns_structured_response(self) -> None:
@@ -97,8 +103,10 @@ class AdaptiveAgentTest(unittest.TestCase):
         result = agent.run("OpenAI 연결 확인")
 
         self.assertEqual(result.action, "llm_error")
-        self.assertEqual(result.output, "LLM 호출 실패: LLM 연결 실패")
-        self.assertIn("failure_classified", [event.name for event in result.events])
+        self.assertIn("LLM 연결 실패", str(result.output), "원인 예외 메시지가 응답에 노출되어야 합니다")
+        failure_events = [e for e in result.events if e.name == "failure_classified"]
+        self.assertTrue(failure_events)
+        self.assertEqual(failure_events[0].details.get("reason"), "external_provider_error")
 
     def test_llm_json_plan_executes_tool(self) -> None:
         llm = StubLLM('{"action":"tool","tool_name":"echo","arguments":{"task":"원문 그대로"}}')
@@ -147,7 +155,14 @@ class AdaptiveAgentTest(unittest.TestCase):
     def test_default_plan_prompt_file_renders_dynamic_context(self) -> None:
         loader = PromptLoader()
 
-        prompt = loader.render("plan.txt", available_tools="[]", task="원문 유지")
+        prompt = loader.render(
+            "plan.txt",
+            available_tools="[]",
+            task="원문 유지",
+            retrieved_skills="[]",
+            reflections="[]",
+            last_tool_result="null",
+        )
 
         self.assertIn("[]", prompt)
         self.assertIn("원문 유지", prompt)
@@ -161,23 +176,183 @@ class AdaptiveAgentTest(unittest.TestCase):
             prompt = loader.load(template_name)
             self.assertGreater(len(prompt.strip()), 0)
 
-    def test_role_nodes_point_to_role_prompt_templates(self) -> None:
-        nodes = [CoderNode(), CriticNode()]
+    def test_role_agents_expose_separate_contracts(self) -> None:
+        agents = [
+            LibrarianAgent(),
+            PlanAgent(lambda _state: {"action": "respond", "response": "ok"}),
+            CoderAgent(),
+            ExecutorAgent(lambda _task, _plan, _state: None),
+            CriticAgent(),
+        ]
 
-        self.assertEqual([node.name for node in nodes], ["code", "critique"])
-        self.assertEqual([node.prompt_template for node in nodes], ["coder.txt", "critic.txt"])
+        self.assertEqual([agent.role for agent in agents], ["librarian", "planner", "coder", "executor", "critic"])
+
+    def test_coder_agent_routes_to_error_when_required_fields_missing(self) -> None:
+        from adaptive_agent.state import AgentState as _State
+
+        cases = [
+            ("name 누락", {"description": "d", "code": "def run(a): pass\n"}, ["name"]),
+            ("description 누락", {"name": "t", "code": "def run(a): pass\n"}, ["description"]),
+            ("code 누락", {"name": "t", "description": "d"}, ["code"]),
+            ("빈 문자열은 누락 취급", {"name": "  ", "description": "d", "code": "def run(a): pass\n"}, ["name"]),
+            (
+                "비-문자열 code는 누락 취급",
+                {"name": "t", "description": "d", "code": {"raw": "stuff"}},
+                ["code"],
+            ),
+        ]
+        for label, plan_arguments, expected_missing in cases:
+            with self.subTest(case=label):
+                state = _State()
+                state.user_task = "create tool"
+                state.current_plan = {
+                    "action": "tool",
+                    "tool_name": "tool_create",
+                    "arguments": plan_arguments,
+                }
+                # coder LLM이 아무 보강도 못 했다고 가정
+                agent = CoderAgent(coder=lambda _s: {})
+
+                result = agent.run(state)
+
+                self.assertEqual(result.next_node, "error")
+                self.assertEqual(result.status, "invalid_arguments")
+                self.assertEqual(result.details["missing_fields"], expected_missing)
+                invalid_events = [e for e in state.events if e.name == "coder_arguments_invalid"]
+                self.assertTrue(invalid_events, "coder_arguments_invalid 이벤트가 있어야 합니다")
+                self.assertEqual(invalid_events[0].details["missing_fields"], expected_missing)
+
+    def test_coder_agent_proceeds_to_execute_when_llm_supplies_missing_fields(self) -> None:
+        from adaptive_agent.state import AgentState as _State
+
+        state = _State()
+        state.user_task = "create tool"
+        state.current_plan = {
+            "action": "tool",
+            "tool_name": "tool_create",
+            "arguments": {"name": "hello_tool", "description": "Greets"},
+        }
+        agent = CoderAgent(coder=lambda _s: {"code": "def run(arguments):\n    return {}\n"})
+
+        result = agent.run(state)
+
+        self.assertEqual(result.next_node, "execute")
+        self.assertEqual(state.current_plan["arguments"]["name"], "hello_tool")
+        self.assertIn("def run", state.current_plan["arguments"]["code"])
+        self.assertIn("tool_code_created", [e.name for e in state.events])
 
     def test_unsupported_clarification_action_is_normalized_to_ask_human(self) -> None:
-        llm = StubLLM('{"action":"clarify","response":"어떤 데이터인지 알려주세요."}')
-        agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            llm = StubLLM('{"action":"clarify","response":"어떤 데이터인지 알려주세요."}')
+            agent = AdaptiveAgent(
+                config=AgentConfig(
+                    workspace_dir=workspace,
+                    tool_library_dir=workspace / ".adaptive_agent" / "tools",
+                    session_dir=workspace / ".adaptive_agent" / "sessions",
+                ),
+                llm_client=llm,
+            )
 
-        result = agent.run("데이터 정리해줘")
+            result = agent.run("데이터 정리해줘")
 
-        event_names = [event.name for event in result.events]
-        self.assertEqual(result.action, "tool")
-        self.assertEqual(result.tool_name, "ask_human")
-        self.assertIn("clarification_requested", event_names)
-        self.assertIn("pending_human_input", str(result.output))
+            event_names = [event.name for event in result.events]
+            self.assertEqual(result.action, "tool")
+            self.assertEqual(result.tool_name, "ask_human")
+            self.assertIn("clarification_requested", event_names)
+            self.assertIn("pending_human_input", str(result.output))
+            self.assertIsNotNone(result.pending)
+            self.assertTrue((workspace / ".adaptive_agent" / "sessions" / f"{result.session_id}.json").exists())
+
+    def test_pending_session_can_resume_only_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            agent = AdaptiveAgent(
+                config=AgentConfig(
+                    workspace_dir=workspace,
+                    tool_library_dir=workspace / ".adaptive_agent" / "tools",
+                    session_dir=workspace / ".adaptive_agent" / "sessions",
+                ),
+                llm_client=SequenceLLM(
+                    [
+                        '{"action":"clarify","response":"어떤 데이터인지 알려주세요."}',
+                        '{"action":"respond","response":"CSV 데이터로 진행합니다."}',
+                    ]
+                ),
+            )
+            result = agent.run("데이터 정리해줘")
+
+            resumed = agent.resume(str(result.session_id), user_input="CSV 데이터")
+
+            self.assertEqual(resumed.action, "llm")
+            self.assertEqual(resumed.output, "CSV 데이터로 진행합니다.")
+            self.assertIn("session_resumed", [event.name for event in resumed.events])
+            with self.assertRaises(ValueError):
+                agent.resume(str(result.session_id), user_input="다시 입력")
+
+    def test_generated_tool_flow_validates_and_requires_approval_before_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            llm = SequenceLLM(
+                [
+                    '{"action":"tool","tool_name":"tool_create","arguments":'
+                    '{"name":"hello_tool","description":"Greets","code":"def run(arguments):\\n    return {\\"hello\\": arguments.get(\\"name\\", \\"world\\")}\\n"}}'
+                ]
+            )
+            agent = AdaptiveAgent(
+                config=AgentConfig(
+                    workspace_dir=workspace,
+                    tool_library_dir=workspace / ".adaptive_agent" / "tools",
+                    session_dir=workspace / ".adaptive_agent" / "sessions",
+                ),
+                llm_client=llm,
+            )
+
+            result = agent.run("인사 툴 만들어줘")
+
+            self.assertEqual(result.action, "approval_required")
+            self.assertEqual(result.tool_name, "tool_validate")
+            self.assertIsNotNone(result.pending)
+            pending_path = workspace / ".adaptive_agent" / "sessions" / f"{result.session_id}.json"
+            pending_text = pending_path.read_text(encoding="utf-8")
+            self.assertIn("tool_approve", pending_text)
+            self.assertNotIn("def run", pending_text)
+
+            approved = agent.resume(str(result.session_id), approve=True)
+
+            self.assertEqual(approved.action, "tool")
+            self.assertEqual(approved.tool_name, "tool_approve")
+            self.assertEqual(approved.output["catalog"]["name"], "hello_tool")
+
+    def test_failed_approval_resume_keeps_session_pending_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            agent = AdaptiveAgent(
+                config=AgentConfig(
+                    workspace_dir=workspace,
+                    tool_library_dir=workspace / ".adaptive_agent" / "tools",
+                    session_dir=workspace / ".adaptive_agent" / "sessions",
+                    max_self_corrections=0,
+                ),
+                llm_client=SequenceLLM(
+                    [
+                        '{"action":"tool","tool_name":"tool_create","arguments":'
+                        '{"name":"changed_tool","description":"Changes","code":"def run(arguments):\\n    return {\\"ok\\": True}\\n"}}'
+                    ]
+                ),
+            )
+            result = agent.run("변경 감지 툴 만들어줘")
+            (workspace / ".adaptive_agent" / "tools" / "changed_tool.py").write_text(
+                "def run(arguments):\n    return {'changed': True}\n",
+                encoding="utf-8",
+            )
+
+            failed = agent.resume(str(result.session_id), approve=True)
+
+            self.assertEqual(failed.action, "tool_error")
+            pending_path = workspace / ".adaptive_agent" / "sessions" / f"{result.session_id}.json"
+            pending = json.loads(pending_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["status"], "pending")
 
     def test_tool_error_can_self_correct_and_reexecute(self) -> None:
         llm = SequenceLLM(
@@ -197,10 +372,10 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertIn("execution_critiqued", event_names)
         self.assertIn("fixed", str(result.output))
         self.assertGreaterEqual(len(llm.prompts), 2)
-        self.assertIn("repairing a failed tool execution", llm.prompts[1])
-        self.assertIn("Original user task: 코드 실행 오류를 고쳐줘", llm.prompts[1])
-        self.assertIn("Failed plan:", llm.prompts[1])
-        self.assertIn("Observed error:", llm.prompts[1])
+        correction_prompt = llm.prompts[1]
+        self.assertIn("코드 실행 오류를 고쳐줘", correction_prompt, "원본 작업 원문이 보정 프롬프트에 포함되어야 합니다")
+        self.assertIn("print(missing_name)", correction_prompt, "실패한 plan 컨텍스트가 보정 프롬프트에 포함되어야 합니다")
+        self.assertNotRegex(correction_prompt, r"\{[a-z_]+\}", "보정 프롬프트의 모든 자리표시자가 치환되어야 합니다")
 
     def test_critic_retry_routes_back_to_plan(self) -> None:
         llm = SequenceLLM(
@@ -239,11 +414,12 @@ class AdaptiveAgentTest(unittest.TestCase):
             output='{"stdout":""}',
         )
 
-        self.assertIn("Return only JSON using the same plan schema as before", prompt)
-        self.assertIn("Original user task: 원본 작업", prompt)
-        self.assertIn('Failed plan: {"action":"tool"}', prompt)
-        self.assertIn("Observed error: NameError", prompt)
-        self.assertIn('Observed output: {"stdout":""}', prompt)
+        # 자유 영역(영문 안내 문구)은 검증하지 않고, 변수 치환 계약만 확인
+        self.assertNotRegex(prompt, r"\{[a-z_]+\}", "모든 자리표시자가 치환되어야 합니다")
+        self.assertIn("원본 작업", prompt)
+        self.assertIn('{"action":"tool"}', prompt)
+        self.assertIn("NameError", prompt)
+        self.assertIn('{"stdout":""}', prompt)
 
 
     def test_double_encoded_json_plan_is_executed(self) -> None:
@@ -367,8 +543,11 @@ class AdaptiveAgentTest(unittest.TestCase):
         result = agent.run("사용자 원문")
 
         self.assertEqual(result.action, "llm")
-        self.assertEqual(result.output, "LLM 계획에 tool_name이 없어 툴을 실행하지 않았습니다.")
-        self.assertIn("plan_validation_failed", [event.name for event in result.events])
+        self.assertIsNone(result.tool_name, "tool_name 누락 plan은 실행되지 않아야 합니다")
+        self.assertTrue(str(result.output).strip(), "거부 사유 메시지는 비어있지 않아야 합니다")
+        validation_events = [e for e in result.events if e.name == "plan_validation_failed"]
+        self.assertTrue(validation_events, "plan_validation_failed 이벤트가 있어야 합니다")
+        self.assertIn("tool_name", str(validation_events[0].details).lower())
 
     def test_unknown_plan_action_falls_back_to_response(self) -> None:
         llm = StubLLM('{"action":"unexpected","response":"대체 응답"}')
@@ -386,9 +565,12 @@ class AdaptiveAgentTest(unittest.TestCase):
 
         result = agent.run("사용자 원문")
 
-        self.assertEqual(result.output, "툴 실행 인자가 객체가 아니어서 실행하지 않았습니다.")
         self.assertEqual(result.action, "llm")
-        self.assertIn("plan_validation_failed", [event.name for event in result.events])
+        self.assertIsNone(result.tool_name, "잘못된 arguments 타입은 툴 실행으로 이어지지 않아야 합니다")
+        self.assertTrue(str(result.output).strip())
+        validation_events = [e for e in result.events if e.name == "plan_validation_failed"]
+        self.assertTrue(validation_events, "plan_validation_failed 이벤트가 있어야 합니다")
+        self.assertIn("arguments", str(validation_events[0].details).lower())
 
     def test_tool_error_records_failure_event(self) -> None:
         llm = StubLLM('{"action":"tool","tool_name":"missing_tool","arguments":{}}')
@@ -418,6 +600,54 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertIn("list_files", tool_names)
         self.assertIn("code_execute", tool_names)
         self.assertIn("ask_human", tool_names)
+
+    def test_user_task_input_variations_are_preserved(self) -> None:
+        cases = [
+            ("한국어", "데이터를 정리해줘"),
+            ("이모지", "🎉 ship it 🚀"),
+            ("긴 입력", "x" * 8_000),
+            ("앞뒤 공백 보존", "  앞 뒤  공백  "),
+            ("탭과 줄바꿈", "first\tline\nsecond line"),
+            ("JSON처럼 보이는 평문", '{"action":"실제로는 평문"}'),
+            ("따옴표 혼합", "\"양쪽\" '단일' 따옴표"),
+            ("이스케이프 시퀀스 평문", "raw \\n not a newline"),
+        ]
+        for label, task in cases:
+            with self.subTest(case=label):
+                llm = StubLLM()
+                agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+
+                result = agent.run(task)
+
+                self.assertEqual(result.task, task, "원문 task가 응답에 그대로 보존되어야 합니다")
+                self.assertGreaterEqual(len(llm.prompts), 1)
+                self.assertIn(task, llm.prompts[0], "원문 task가 plan 프롬프트에 포함되어야 합니다")
+
+    def test_invalid_plan_json_variations_fall_back_safely(self) -> None:
+        cases = [
+            ("완전 비-JSON", "그냥 자유 텍스트 응답"),
+            ("미완성 JSON", '{"action":"tool",'),
+            ("내부 깨진 JSON", '{"action":"tool", "tool_name": "echo", arguments: {}}'),
+            ("빈 문자열", ""),
+            ("JSON null", "null"),
+            ("JSON 배열", "[1, 2, 3]"),
+            ("숫자만", "42"),
+        ]
+        for label, llm_response in cases:
+            with self.subTest(case=label):
+                agent = AdaptiveAgent(
+                    config=AgentConfig(max_self_corrections=0),
+                    llm_client=StubLLM(llm_response),
+                )
+
+                result = agent.run("계획 요청")
+
+                # 깨진 JSON은 router_error/exception이 아닌, 정상적인 fallback action으로 회수되어야 함
+                self.assertIn(
+                    result.action,
+                    {"llm", "tool", "input_required", "tool_error"},
+                    f"잘못된 응답 '{label}'이 안전한 action으로 폴백되어야 합니다",
+                )
 
     def test_agent_state_blueprint_fields_have_defaults(self) -> None:
         agent = AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM())

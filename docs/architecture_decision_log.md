@@ -32,7 +32,7 @@ CLI
 - `AdaptiveAgent.run()`에 모든 분기를 계속 쌓지 않는다.
 - 공유 상태는 `AgentState`가 담당한다.
 - 흐름 제어는 `StateMachineRouter`와 `next_node` 기반으로 분리한다.
-- 역할별 Agent는 `nodes/` 계약을 따른다.
+- 초기 역할별 구현은 `nodes/` 계약을 따랐으나, 이번 MVP에서 `agents/` 계약으로 승격한다.
 
 ### 2026-05-02: 프롬프트는 코드 밖 파일로 관리한다
 
@@ -48,6 +48,13 @@ CLI
 - `Critic Agent`: 실행 결과와 원래 의도를 비교해 성공, 실패, 재시도, 사용자 입력 필요 여부를 판단한다.
 - `Skill`은 현재 LLM 프롬프트 노드가 아니라 `SkillCatalog` 기반 저장/metadata 계층이다.
 
+### 2026-05-02: 이번 구현에서 역할별 agent를 분리한다
+
+- `nodes/` 경계를 유지하는 수준이 아니라 Plan, Coder, Executor, Critic, Librarian 역할을 별도 agent 계약으로 분리한다.
+- 기존 `adaptive_agent/nodes/`는 현재 코드 기준선이며, 새 구현은 `adaptive_agent/agents/` 경계로 이동하거나 호환 shim을 둔다.
+- `StateMachineRouter`는 계속 `AgentState.next_node`를 기준으로 전이하되, node 구현 세부가 아니라 역할별 agent를 호출하도록 정리한다.
+- 각 agent는 공유 `AgentState`를 사용하되 입력/출력 계약, 이벤트 기록, 실패 책임 범위를 명확히 가진다.
+
 ### 2026-05-02: 생성 툴은 사용자 승인 후에만 manifest에 등록한다
 
 - `tool_create`는 생성 파일과 개별 metadata만 만든다.
@@ -60,6 +67,33 @@ CLI
 - 임시 intent 분류 정규식을 늘리는 방식은 피한다.
 - 새 동작은 가능한 한 `AgentState`, `StateMachineRouter`, `nodes`, `prompts`, `SkillCatalog` 경계 안에 배치한다.
 - 구조화된 JSON action 계약을 우선 확장한다.
+
+### 2026-05-02: 다음 MVP는 승인 툴 재사용 루프를 완성한다
+
+- 목표는 `tool_approve`로 manifest에 등록된 생성 툴이 다음 세션에서 실제 실행 가능한 `ToolRegistry` 항목으로 로드되는 것이다.
+- 검색 후보와 실행 가능 툴이 분리되어 `Unknown tool`로 끝나는 간극을 먼저 닫는다.
+- 새 툴 생성 전에는 내장 툴과 승인된 manifest를 Top-K로 검색하고, 중복 생성을 피한다.
+- 저장 정책은 유지한다. 생성 툴은 검증과 사용자 승인 후에만 `manifest.json`에 등록된다.
+- HITL은 단순 응답 상태가 아니라 session id로 재개 가능한 제어 흐름으로 확장한다.
+- Critic reflection은 retry 시 다음 planning context에 전달한다.
+
+### 2026-05-02: CLI session은 기본 새 session으로 시작한다
+
+- CLI를 종료했다가 다시 실행하면 기본적으로 새 session을 시작한다.
+- 사용자가 명시적으로 원할 때만 이전 session을 복구해 이어간다.
+- 이번 구현에서는 pending HITL 재개에 필요한 최소 snapshot만 저장한다.
+- 전체 history 압축, session 만료, 민감정보 제거, model별 context budget 관리는 장기 과제로 둔다.
+- session id 존재 여부, pending 상태 여부, workspace 내부 session 파일 여부를 검증한다.
+- 완료/거부/실패로 닫힌 session은 다시 resume하지 않는다.
+- session 파일 누적 가능성과 수동 삭제 경로를 사용자에게 안내한다.
+
+### 2026-05-02: 승인된 generated tool도 subprocess에서 실행한다
+
+- 승인된 생성 툴을 메인 프로세스에서 직접 import해 실행하지 않는다.
+- 검증·승인된 manifest 항목만 실행 후보로 로드하되, runtime 실행은 subprocess 경계를 유지한다.
+- stdout/stderr/exit code 요약을 CLI/JSON 출력에 남겨 성능과 디버깅성을 보완한다.
+- manifest와 generated tool 파일이 불일치하거나 파일이 사라진 경우 loader 실패로 분류한다.
+- Docker, virtualenv, 제한 유저, 개발 환경별 sandbox profile은 이후 환경이 정해진 뒤 검토한다.
 
 ## 추가 요구사항
 
@@ -82,14 +116,23 @@ CLI
 
 ## 열린 질문
 
-- Coder/Critic을 실제 LLM 호출 노드로 언제 승격할 것인가?
+### 이번 구현 전 결정 필요
+
+- HITL session snapshot 저장 위치와 최소 저장 필드는 어떻게 둘 것인가? 초기안은 `.adaptive_agent/sessions/` 파일 저장과 민감정보 미저장이다.
+- CLI 재개 UX는 명령어 수를 늘리지 않으면서 어떻게 안내할 것인가? 초기안은 pending 응답에 다음 resume 명령을 제시하는 것이다.
+
+### 장기 검토
+
 - `AgentState.next_node`를 `Literal`로 유지할지, 런타임 검증 가능한 `Enum`으로 바꿀 것인가?
-- SkillCatalog에 embedding vector를 직접 저장할지, 별도 index 참조만 둘 것인가?
-- 승인/거부 HITL 흐름을 CLI에서 어떻게 재개 가능하게 만들 것인가?
+- SkillCatalog 검색은 당분간 키워드 Top-K로 두고, embedding vector를 직접 저장할지 별도 index 참조만 둘지는 툴 수가 늘어난 뒤 결정한다.
+- session history 압축, session 만료, model별 context budget, prompt별 context 우선순위는 어떻게 관리할 것인가?
+- CLI가 서비스/API로 확장될 경우 사용자 구분, 권한, 보관 기간, 동시성 관리는 어떻게 둘 것인가?
+- Docker, virtualenv, 제한 유저 등 더 강한 generated tool sandbox는 어떤 개발/배포 환경을 기준으로 선택할 것인가?
 
 ## 다음 검토 후보
 
-- PlanNode 이후 Coder/Critic 실행 루프 연결
+- `nodes/`에서 `agents/`로 이동할 때 기존 import 호환성을 얼마나 유지할지 결정
+- Plan 이후 Coder/Executor/Critic/Librarian agent 실행 루프 연결
 - `use_tool`, `create_tool`, `approve_tool`, `final_answer` 계약의 provider별 안정성 확인
 - `manifest.json` metadata schema와 migration 정책
 - AAVS-004, AAVS-005 기반 저장 승인/재사용 검증
