@@ -33,6 +33,12 @@ class ToolRegistry:
 def create_default_registry(
     workspace_dir: Path | None = None,
     tool_library_dir: Path | None = None,
+    *,
+    artifact_max_bytes: int = 10 * 1024 * 1024,
+    artifact_max_count: int = 1000,
+    web_fetch_allowed_domains: tuple[str, ...] | list[str] = (),
+    web_fetch_max_bytes: int = 1024 * 1024,
+    web_fetch_timeout_seconds: float = 10.0,
 ) -> ToolRegistry:
     """Create the default builtin tool registry."""
 
@@ -42,6 +48,7 @@ def create_default_registry(
     tool_library = (tool_library_dir or workspace / ".adaptive_agent" / "tools").resolve()
     memory_dir = workspace / ".adaptive_agent" / "memory"
     sandbox = LocalSandboxBackend(raw_workspace)
+    web_fetch_allowed = list(web_fetch_allowed_domains)
 
     def echo(arguments: dict[str, object]) -> ToolExecutionResult:
         return ToolExecutionResult(success=True, output=arguments.get("task", ""))
@@ -297,6 +304,36 @@ def create_default_registry(
             category="planning",
             safety_level="low",
             usage="python3 -m adaptive_agent --tool suggest_builtin_tools",
+        )
+    )
+    registry.register(
+        Tool(
+            name="artifact_store",
+            description="실행 산출물(파일/diff/로그)을 sha256 ID로 워크스페이스에 저장하고 조회합니다.",
+            handler=lambda arguments: builtins.artifact_store(
+                arguments,
+                workspace=workspace,
+                max_bytes=artifact_max_bytes,
+                max_count=artifact_max_count,
+            ),
+            category="filesystem",
+            safety_level="medium",
+            usage='python3 -m adaptive_agent --json --tool artifact_store --arg op=put --arg name=log.txt --arg content=hello',
+        )
+    )
+    registry.register(
+        Tool(
+            name="web_fetch",
+            description="화이트리스트된 도메인에 한해 HTTP(S) 요청을 보내고 응답을 반환합니다.",
+            handler=lambda arguments: builtins.web_fetch(
+                arguments,
+                allowed_domains=web_fetch_allowed,
+                max_bytes=web_fetch_max_bytes,
+                timeout_seconds=web_fetch_timeout_seconds,
+            ),
+            category="execution",
+            safety_level="high",
+            usage='python3 -m adaptive_agent --json --tool web_fetch --arg url=https://example.com',
         )
     )
     registry.generated_load_results = load_generated_tools(registry, tool_library=tool_library, sandbox=sandbox)
