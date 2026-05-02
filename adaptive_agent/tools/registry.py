@@ -7,7 +7,13 @@ from pathlib import Path
 
 from adaptive_agent.skills import SkillCatalog
 from adaptive_agent.tools import builtins
-from adaptive_agent.tools.models import Tool, ToolExecutionResult
+from adaptive_agent.tools.models import (
+    SKILL_CLASS_ATOMIC,
+    SKILL_CLASS_FUNCTIONAL,
+    SKILL_CLASS_PLANNING,
+    Tool,
+    ToolExecutionResult,
+)
 from adaptive_agent.tools.sandbox import LocalSandboxBackend
 
 
@@ -33,6 +39,12 @@ class ToolRegistry:
 def create_default_registry(
     workspace_dir: Path | None = None,
     tool_library_dir: Path | None = None,
+    *,
+    artifact_max_bytes: int = 10 * 1024 * 1024,
+    artifact_max_count: int = 1000,
+    web_fetch_allowed_domains: tuple[str, ...] | list[str] = (),
+    web_fetch_max_bytes: int = 1024 * 1024,
+    web_fetch_timeout_seconds: float = 10.0,
 ) -> ToolRegistry:
     """Create the default builtin tool registry."""
 
@@ -42,6 +54,7 @@ def create_default_registry(
     tool_library = (tool_library_dir or workspace / ".adaptive_agent" / "tools").resolve()
     memory_dir = workspace / ".adaptive_agent" / "memory"
     sandbox = LocalSandboxBackend(raw_workspace)
+    web_fetch_allowed = list(web_fetch_allowed_domains)
 
     def echo(arguments: dict[str, object]) -> ToolExecutionResult:
         return ToolExecutionResult(success=True, output=arguments.get("task", ""))
@@ -91,6 +104,7 @@ def create_default_registry(
             description="입력 작업을 그대로 반환하는 상태 확인용 툴입니다.",
             handler=echo,
             category="atomic",
+            skill_class=SKILL_CLASS_ATOMIC,
             usage='python3 -m adaptive_agent --tool echo --arg task="echo hello"',
         )
     )
@@ -100,6 +114,7 @@ def create_default_registry(
             description="reference.md 방법론을 기반으로 프로젝트 요구사항을 분해합니다.",
             handler=analyze_requirements,
             category="planning",
+            skill_class=SKILL_CLASS_PLANNING,
             usage="python3 -m adaptive_agent --tool analyze_requirements",
         )
     )
@@ -109,6 +124,7 @@ def create_default_registry(
             description="등록된 내장 툴 목록을 출력합니다.",
             handler=list_tools,
             category="utility",
+            skill_class=SKILL_CLASS_PLANNING,
             usage="python3 -m adaptive_agent --list-tools",
         )
     )
@@ -118,6 +134,7 @@ def create_default_registry(
             description="작업공간 파일 목록을 안전하게 조회합니다.",
             handler=list_files,
             category="utility",
+            skill_class=SKILL_CLASS_FUNCTIONAL,
             usage="python3 -m adaptive_agent --tool list_files --arg path=adaptive_agent",
         )
     )
@@ -127,6 +144,7 @@ def create_default_registry(
             description="Python 코드를 별도 프로세스의 임시 작업공간에서 실행하고 결과/에러/기대값 판정을 반환합니다.",
             handler=lambda arguments: builtins.code_execute(arguments, sandbox=sandbox),
             category="execution",
+            skill_class=SKILL_CLASS_FUNCTIONAL,
             safety_level="high",
             usage='python3 -m adaptive_agent --json --tool code_execute --arg code="print(1)" --arg lang=python',
         )
@@ -137,6 +155,7 @@ def create_default_registry(
             description="셸 명령을 별도 프로세스의 임시 작업공간에서 실행하고 결과/에러/기대값 판정을 반환합니다.",
             handler=lambda arguments: builtins.shell_run(arguments, sandbox=sandbox),
             category="execution",
+            skill_class=SKILL_CLASS_FUNCTIONAL,
             safety_level="high",
             usage='python3 -m adaptive_agent --json --tool shell_run --arg code="echo ok"',
         )
@@ -147,6 +166,7 @@ def create_default_registry(
             description="워크스페이스 내부 UTF-8 텍스트 파일을 읽습니다.",
             handler=lambda arguments: builtins.file_read(arguments, workspace=workspace),
             category="filesystem",
+            skill_class=SKILL_CLASS_FUNCTIONAL,
             safety_level="medium",
             usage="python3 -m adaptive_agent --json --tool file_read --arg path=README.md",
         )
@@ -157,6 +177,7 @@ def create_default_registry(
             description="워크스페이스 내부 파일에 UTF-8 텍스트를 씁니다.",
             handler=lambda arguments: builtins.file_write(arguments, workspace=workspace),
             category="filesystem",
+            skill_class=SKILL_CLASS_FUNCTIONAL,
             safety_level="high",
             usage='python3 -m adaptive_agent --json --tool file_write --arg path=notes.txt --arg content="hello"',
         )
@@ -177,6 +198,7 @@ def create_default_registry(
             description="워크스페이스 내부 UTF-8 파일에 단일 텍스트 치환 패치를 적용하거나 diff를 미리 봅니다.",
             handler=lambda arguments: builtins.file_patch(arguments, workspace=workspace),
             category="filesystem",
+            skill_class=SKILL_CLASS_FUNCTIONAL,
             safety_level="high",
             usage='python3 -m adaptive_agent --json --tool file_patch --arg path=notes.txt --arg old_text=old --arg new_text=new --arg dry_run=true',
         )
@@ -187,6 +209,7 @@ def create_default_registry(
             description="사용자에게 질문 또는 선택지를 요청하는 pending_human_input 결과를 반환합니다.",
             handler=builtins.ask_human,
             category="human_in_the_loop",
+            skill_class=SKILL_CLASS_ATOMIC,
             safety_level="low",
             usage='python3 -m adaptive_agent --json --tool ask_human --arg questions="어떤 옵션을 선택할까요?"',
         )
@@ -197,6 +220,7 @@ def create_default_registry(
             description="실행 전 계획과 위험도를 제시하고 사용자 승인이 필요함을 반환합니다.",
             handler=builtins.propose_actions,
             category="human_in_the_loop",
+            skill_class=SKILL_CLASS_ATOMIC,
             safety_level="low",
             usage='python3 -m adaptive_agent --json --tool propose_actions --arg plan="파일을 수정합니다" --arg risk_level=medium',
         )
@@ -207,6 +231,7 @@ def create_default_registry(
             description="프로젝트 테스트 명령을 워크스페이스 복사본에서 실행하고 결과/기대값 판정을 반환합니다.",
             handler=lambda arguments: builtins.test_run(arguments, sandbox=sandbox),
             category="execution",
+            skill_class=SKILL_CLASS_FUNCTIONAL,
             safety_level="high",
             usage='python3 -m adaptive_agent --json --tool test_run --arg command="python3 -m unittest discover"',
         )
@@ -217,6 +242,7 @@ def create_default_registry(
             description="새 Python 도구 코드를 툴 라이브러리에 저장합니다.",
             handler=lambda arguments: builtins.tool_create(arguments, tool_library=tool_library),
             category="tool_library",
+            skill_class=SKILL_CLASS_FUNCTIONAL,
             safety_level="high",
             usage='python3 -m adaptive_agent --json --tool tool_create --arg name=my_tool --arg description="..." --arg code="def run(args): return args"',
         )
@@ -241,6 +267,7 @@ def create_default_registry(
                 tool_library=tool_library,
             ),
             category="tool_library",
+            skill_class=SKILL_CLASS_PLANNING,
             safety_level="low",
             usage="python3 -m adaptive_agent --json --tool tool_search --arg query=file",
         )
@@ -255,6 +282,7 @@ def create_default_registry(
                 sandbox=sandbox,
             ),
             category="tool_library",
+            skill_class=SKILL_CLASS_FUNCTIONAL,
             safety_level="high",
             usage="python3 -m adaptive_agent --json --tool tool_validate --arg name=my_tool",
         )
@@ -265,6 +293,7 @@ def create_default_registry(
             description="사용자 승인 후 검증된 생성 도구를 manifest 스킬 카탈로그에 등록합니다.",
             handler=lambda arguments: builtins.tool_approve(arguments, tool_library=tool_library),
             category="tool_library",
+            skill_class=SKILL_CLASS_FUNCTIONAL,
             safety_level="high",
             usage="python3 -m adaptive_agent --json --tool tool_approve --arg name=my_tool",
         )
@@ -275,6 +304,7 @@ def create_default_registry(
             description="에이전트 로컬 메모리 값을 읽습니다.",
             handler=lambda arguments: builtins.memory_read(arguments, memory_dir=memory_dir),
             category="memory",
+            skill_class=SKILL_CLASS_FUNCTIONAL,
             safety_level="medium",
             usage="python3 -m adaptive_agent --json --tool memory_read --arg key=preference",
         )
@@ -285,6 +315,7 @@ def create_default_registry(
             description="사용자 승인 후 유지할 에이전트 로컬 메모리 값을 저장합니다.",
             handler=lambda arguments: builtins.memory_write(arguments, memory_dir=memory_dir),
             category="memory",
+            skill_class=SKILL_CLASS_FUNCTIONAL,
             safety_level="high",
             usage='python3 -m adaptive_agent --json --tool memory_write --arg key=preference --arg value="한국어 응답"',
         )
@@ -295,8 +326,39 @@ def create_default_registry(
             description="현재 목록 외에 추가로 유용한 내장 도구 후보와 이유를 반환합니다.",
             handler=builtins.suggested_builtin_tools,
             category="planning",
+            skill_class=SKILL_CLASS_PLANNING,
             safety_level="low",
             usage="python3 -m adaptive_agent --tool suggest_builtin_tools",
+        )
+    )
+    registry.register(
+        Tool(
+            name="artifact_store",
+            description="실행 산출물(파일/diff/로그)을 sha256 ID로 워크스페이스에 저장하고 조회합니다.",
+            handler=lambda arguments: builtins.artifact_store(
+                arguments,
+                workspace=workspace,
+                max_bytes=artifact_max_bytes,
+                max_count=artifact_max_count,
+            ),
+            category="filesystem",
+            safety_level="medium",
+            usage='python3 -m adaptive_agent --json --tool artifact_store --arg op=put --arg name=log.txt --arg content=hello',
+        )
+    )
+    registry.register(
+        Tool(
+            name="web_fetch",
+            description="화이트리스트된 도메인에 한해 HTTP(S) 요청을 보내고 응답을 반환합니다.",
+            handler=lambda arguments: builtins.web_fetch(
+                arguments,
+                allowed_domains=web_fetch_allowed,
+                max_bytes=web_fetch_max_bytes,
+                timeout_seconds=web_fetch_timeout_seconds,
+            ),
+            category="execution",
+            safety_level="high",
+            usage='python3 -m adaptive_agent --json --tool web_fetch --arg url=https://example.com',
         )
     )
     registry.generated_load_results = load_generated_tools(registry, tool_library=tool_library, sandbox=sandbox)
@@ -336,6 +398,9 @@ def load_generated_tools(
         if actual_hash != expected_hash:
             load_results.append({"name": name, "loaded": False, "reason": "generated_tool_file_hash_mismatch"})
             continue
+        raw_skill_class = str(metadata.get("skill_class") or "functional").lower()
+        if raw_skill_class not in {"planning", "functional", "atomic"}:
+            raw_skill_class = "functional"
         registry.register(
             Tool(
                 name=name,
@@ -347,6 +412,7 @@ def load_generated_tools(
                     sandbox=sandbox,
                 ),
                 category=str(metadata.get("category") or "generated"),
+                skill_class=raw_skill_class,
                 safety_level=str(metadata.get("safety_level") or "high"),
                 usage=f"python3 -m adaptive_agent --json --tool {name}",
                 source="generated",

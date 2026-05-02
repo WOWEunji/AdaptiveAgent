@@ -6,9 +6,14 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from adaptive_agent.agents import (
+    execute_normalized_tool as _execute_normalized_tool_helper,
+    run_self_correction_loop as _run_self_correction_loop_helper,
+)
 from adaptive_agent.config import AgentConfig
 from adaptive_agent.llms.base import LLMClient
 from adaptive_agent.llms.factory import create_llm_client
+from adaptive_agent.llms.usage import LLMUsage, aggregate_usage
 from adaptive_agent.prompts import PromptLoader
 from adaptive_agent.router import RouterDependencies, StateMachineRouter
 from adaptive_agent.sessions import SessionStore
@@ -29,24 +34,7 @@ class AgentResponse:
     events: list[AgentEvent] = field(default_factory=list)
     session_id: str | None = None
     pending: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class _ToolAttemptOutcome:
-    """One tool execution result + the data the retry loop needs to continue.
-
-    ``response`` is the terminal :class:`AgentResponse` (when success follow-up
-    short-circuited), or ``None`` when the router should keep going.
-    ``last_*`` fields capture the inputs/observations of this attempt and are
-    fed into the next correction prompt on failure.
-    """
-
-    success: bool
-    response: AgentResponse | None
-    last_plan: dict[str, Any]
-    last_error: str | None
-    last_output: Any
-    tool_name: str
+    llm_usage_summary: dict[str, Any] | None = None
 
 
 _VALID_PLAN_ACTIONS = {"tool", "respond"}
@@ -80,10 +68,16 @@ class AdaptiveAgent:
         self.registry = registry or create_default_registry(
             self.config.workspace_dir,
             tool_library_dir=self.config.tool_library_dir,
+            artifact_max_bytes=self.config.artifact_max_bytes,
+            artifact_max_count=self.config.artifact_max_count,
+            web_fetch_allowed_domains=self.config.web_fetch_allowed_domains,
+            web_fetch_max_bytes=self.config.web_fetch_max_bytes,
+            web_fetch_timeout_seconds=self.config.web_fetch_timeout_seconds,
         )
         self.executor = executor or ToolExecutor(self.registry)
         self.prompt_loader = prompt_loader or PromptLoader()
         self.session_store = SessionStore(self.config.session_dir)
+        self._cleanup_summary: dict[str, Any] = self._maybe_cleanup_sessions()
         self.skill_catalog = SkillCatalog(self.config.tool_library_dir)
         self.router = StateMachineRouter(
             RouterDependencies(
@@ -98,6 +92,20 @@ class AdaptiveAgent:
                 max_steps=self.config.max_router_steps,
             )
         )
+
+    def _maybe_cleanup_sessions(self) -> dict[str, Any]:
+        """Run TTL/count cleanup if enabled in config, return the summary."""
+
+        if not self.config.session_cleanup_enabled:
+            return {"deleted": [], "reasons": {}}
+        try:
+            return self.session_store.cleanup_expired(
+                max_age_days=self.config.session_max_age_days,
+                max_count=self.config.session_max_count,
+            )
+        except OSError:
+            # Non-fatal: agent must boot even if the sessions dir is unreadable.
+            return {"deleted": [], "reasons": {}}
 
     def list_tools(self) -> list:
         """Return currently registered tools."""
@@ -140,6 +148,29 @@ class AdaptiveAgent:
             max_workers=self.config.max_parallel_perspectives,
             build_per_perspective_agent=_build,
         )
+    def _record_llm_call(self, state: AgentState | None, *, purpose: str) -> None:
+        """Read llm_client.last_usage (set by provider) and accumulate on state.
+
+        Provider 클라이언트가 usage를 채우지 않으면 (stub LLM 등) 기록 없이
+        skip — 사용량 추적 자체가 best-effort.
+        """
+
+        if state is None:
+            return
+        usage = getattr(self.llm_client, "last_usage", None)
+        if usage is None:
+            return
+        record = {
+            "provider": usage.provider,
+            "model": usage.model,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens,
+            "estimated_cost_usd": usage.estimated_cost_usd,
+            "purpose": purpose,
+        }
+        state.llm_usage_records.append(record)
+        state.record_event("llm_call_recorded", **record)
 
     def run(self, task: str) -> AgentResponse:
         """Run one preserved user task through the state-machine router."""
@@ -227,162 +258,22 @@ class AdaptiveAgent:
         plan: dict[str, Any],
         state: AgentState,
     ) -> AgentResponse | None:
-        """Execute a normalized tool plan with bounded self-correction.
+        """Thin facade over :mod:`adaptive_agent.agents.executor` helpers.
 
-        First attempt + (optional) bounded retry loop. Each individual tool
-        execution is delegated to :meth:`_execute_normalized_tool`; the retry
-        loop lives in :meth:`_run_self_correction_loop`.
+        The bounded execution + self-correction logic now lives in
+        ``agents/executor.py`` so the role boundary matches the router
+        diagram. This method is kept on the agent because router dependency
+        injection wires ``run_normalized_plan=self._run_normalized_plan``.
         """
 
         if plan.get("action") != "tool":
             return None
 
-        outcome = self._execute_normalized_tool(task, plan, state)
+        outcome = _execute_normalized_tool_helper(self, task, plan, state)
         if outcome.success:
             return outcome.response
 
-        return self._run_self_correction_loop(task=task, last_outcome=outcome, state=state)
-
-    def _execute_normalized_tool(
-        self,
-        task: str,
-        plan: dict[str, Any],
-        state: AgentState,
-        *,
-        retry_attempt: int | None = None,
-    ) -> "_ToolAttemptOutcome":
-        """Execute a single normalized ``tool`` plan and record events.
-
-        On success delegates follow-up routing to
-        :meth:`_handle_successful_tool_result`; the returned response is either
-        an :class:`AgentResponse` (terminal) or ``None`` (router continues).
-        """
-
-        tool_name = str(plan.get("tool_name") or "")
-        arguments = self._normalized_arguments(plan)
-        state.last_tool_name = tool_name
-        state.last_tool_arguments = dict(arguments)
-        code = arguments.get("code")
-        if isinstance(code, str):
-            state.generated_code = code
-        self._record_tool_spec(state, tool_name, arguments)
-        if retry_attempt is not None:
-            state.record_event("tool_reexecuted", tool_name=tool_name, attempt=retry_attempt)
-
-        result = self.run_tool(tool_name, arguments, _state=state)
-        state.last_tool_result = {
-            "success": result.success,
-            "output": result.output,
-            "error": result.error,
-        }
-        self._record_tool_result(state, tool_name, result.success, result.error)
-
-        normalized_plan = {"action": "tool", "tool_name": tool_name, "arguments": arguments}
-        if result.success:
-            response = self._handle_successful_tool_result(task, tool_name, result.output, state)
-            return _ToolAttemptOutcome(
-                success=True,
-                response=response,
-                last_plan=normalized_plan,
-                last_error=result.error,
-                last_output=result.output,
-                tool_name=tool_name,
-            )
-
-        state.failure_count += 1
-        state.error_log = str(result.error or "")
-        state.reflections.append(f"tool_execution_error:{tool_name}:{result.error}")
-        state.record_event("failure_classified", reason="tool_execution_error")
-        return _ToolAttemptOutcome(
-            success=False,
-            response=None,
-            last_plan=normalized_plan,
-            last_error=result.error,
-            last_output=result.output,
-            tool_name=tool_name,
-        )
-
-    def _run_self_correction_loop(
-        self,
-        *,
-        task: str,
-        last_outcome: "_ToolAttemptOutcome",
-        state: AgentState,
-    ) -> AgentResponse:
-        """Replan and re-execute up to ``max_self_corrections`` times.
-
-        Returns either a final ``tool_error`` response (loop exhausted or
-        provider failure) or the corrected plan's terminal response.
-        """
-
-        current_plan = last_outcome.last_plan
-        current_error = last_outcome.last_error
-        current_output = last_outcome.last_output
-        tool_name = last_outcome.tool_name
-
-        for attempt in range(1, self.config.max_self_corrections + 1):
-            state.record_event(
-                "self_correction_started",
-                attempt=attempt,
-                tool_name=tool_name,
-                error=current_error,
-            )
-            try:
-                corrected_plan = self._plan_correction_with_llm(
-                    task,
-                    current_plan,
-                    error=current_error,
-                    output=current_output,
-                )
-            except Exception as exc:
-                state.record_event("failure_classified", reason="external_provider_error")
-                current_error = f"LLM self-correction failed: {exc}"
-                break
-
-            validation_error = corrected_plan.pop("_validation_error", None)
-            if validation_error:
-                state.record_event("plan_validation_failed", reason=validation_error)
-            if corrected_plan.get("action") != "tool":
-                if corrected_plan.get("needs_user_input"):
-                    state.record_event(
-                        "clarification_requested",
-                        reason="self_correction_requested_user_input",
-                    )
-                state.record_event("final_response_created", action="llm")
-                return AgentResponse(
-                    task=task,
-                    output=corrected_plan.get("response", ""),
-                    action="llm",
-                    events=state.events,
-                )
-
-            outcome = self._execute_normalized_tool(
-                task,
-                corrected_plan,
-                state,
-                retry_attempt=attempt,
-            )
-            if outcome.success:
-                # Successful retry — return whatever follow-up routing produced
-                # (None means the router should continue, which the caller of
-                # ``_run_normalized_plan`` propagates faithfully).
-                return outcome.response  # type: ignore[return-value]
-
-            current_plan = outcome.last_plan
-            current_error = outcome.last_error
-            current_output = outcome.last_output
-            tool_name = outcome.tool_name
-
-        state.record_event("final_response_created", action="tool_error")
-        state.next_node = "error"
-        return AgentResponse(
-            task=task,
-            output=f"툴 실행 실패: {current_error}",
-            tool_name=tool_name,
-            action="tool_error",
-            events=state.events,
-            session_id=state.session_id,
-        )
+        return _run_self_correction_loop_helper(self, task=task, last_outcome=outcome, state=state)
 
     def _handle_successful_tool_result(
         self,
@@ -503,6 +394,19 @@ class AdaptiveAgent:
             success=success,
             has_error=error is not None,
         )
+        # tool_approve가 manifest_merge 정보를 흘려보내면 별도 이벤트로 노출
+        # (Phase 1 of #16: 이름 충돌 자동 병합의 가시성)
+        if tool_name == "tool_approve" and success:
+            last_result = state.last_tool_result or {}
+            output = last_result.get("output") if isinstance(last_result, dict) else None
+            merge_info = output.get("manifest_merge") if isinstance(output, dict) else None
+            if isinstance(merge_info, dict) and merge_info.get("merged"):
+                state.record_event(
+                    "manifest_entry_merged",
+                    tool_name=str(output.get("tool", {}).get("name") or ""),
+                    previous_usage_count=merge_info.get("previous_usage_count"),
+                    previous_failure_count=merge_info.get("previous_failure_count"),
+                )
 
     def _plan_with_llm(self, task: str) -> dict[str, Any]:
         """Create a normalized plan from the LLM response."""
@@ -516,6 +420,7 @@ class AdaptiveAgent:
         """Create a normalized plan with shared-state context."""
 
         response = self.llm_client.complete(self._build_prompt(state.user_task, state=state))
+        self._record_llm_call(state, purpose="plan")
         parsed = self._loads_plan_json(response)
 
         return self._normalize_plan(parsed, fallback_response=response)
@@ -551,6 +456,7 @@ class AdaptiveAgent:
                 ),
             )
         )
+        self._record_llm_call(state, purpose="code")
         try:
             parsed = self._loads_plan_json(response)
         except json.JSONDecodeError:
@@ -577,6 +483,9 @@ class AdaptiveAgent:
                 output=output,
             )
         )
+        # state는 호출자가 전달하지 않아 None — usage는 다음 plan/critique 사이클에
+        # 함께 잡힌다 (이번 호출 자체의 usage는 last_usage에 남아 있음).
+        self._record_llm_call(self.router.last_state, purpose="correction")
         try:
             parsed = self._loads_plan_json(response)
         except json.JSONDecodeError:
@@ -587,6 +496,7 @@ class AdaptiveAgent:
         """Create a normalized critique verdict from the latest execution state."""
 
         response = self.llm_client.complete(self._build_critic_prompt(state))
+        self._record_llm_call(state, purpose="critique")
         try:
             parsed = self._loads_plan_json(response)
         except json.JSONDecodeError:

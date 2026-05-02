@@ -59,11 +59,26 @@ tests/
 
 ## 설치 및 환경 설정
 
+가장 간단한 설치 (소스에서 editable):
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 cp .env.example .env
+```
+
+설치 후엔 `python -m adaptive_agent ...` 외에 짧은 콘솔 진입점도 사용 가능합니다:
+
+```bash
+adaptive-agent --list-tools
+adaptive-agent --tool echo --arg task=hello
+```
+
+기존 방식(requirements.txt 직접 설치)도 그대로 동작합니다:
+
+```bash
+pip install -r requirements.txt
 ```
 
 ## Validation Scenarios

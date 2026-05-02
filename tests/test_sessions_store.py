@@ -174,5 +174,167 @@ class InputVariationContractTest(unittest.TestCase):
         self.assertIn(loaded["pending_output"], ["string output value", {"status": "pending"}])
 
 
+class SessionCleanupTest(unittest.TestCase):
+    """cleanup_expired의 TTL/cap 정책 검증."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.store = SessionStore(sessions_dir=self.dir)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _seed(self, session_id: str, *, days_old: int) -> None:
+        """Write a session payload with updated_at days_old days in the past."""
+
+        from datetime import datetime, timedelta, timezone
+
+        ts = datetime.now(timezone.utc) - timedelta(days=days_old)
+        payload = {
+            "session_id": session_id,
+            "status": "pending",
+            "user_task": f"task-{session_id[:6]}",
+            "updated_at": ts.isoformat().replace("+00:00", "Z"),
+        }
+        (self.dir / f"{session_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_cleanup_on_empty_dir_returns_no_deletions(self) -> None:
+        result = self.store.cleanup_expired()
+        self.assertEqual(result, {"deleted": [], "reasons": {}})
+
+    def test_ttl_deletes_old_sessions(self) -> None:
+        self._seed("a" * 32, days_old=45)  # past TTL
+        self._seed("b" * 32, days_old=10)  # within TTL
+
+        result = self.store.cleanup_expired(max_age_days=30, max_count=100)
+
+        self.assertIn("a" * 32, result["deleted"])
+        self.assertNotIn("b" * 32, result["deleted"])
+        self.assertEqual(result["reasons"]["a" * 32], "ttl")
+        self.assertFalse((self.dir / ("a" * 32 + ".json")).exists())
+        self.assertTrue((self.dir / ("b" * 32 + ".json")).exists())
+
+    def test_cap_deletes_oldest_first(self) -> None:
+        # 5 fresh sessions, cap to 2 → oldest 3 deleted.
+        for i in range(5):
+            self._seed(f"{i}" * 32, days_old=i)  # i=0 newest, i=4 oldest
+
+        result = self.store.cleanup_expired(max_age_days=365, max_count=2)
+
+        self.assertEqual(len(result["deleted"]), 3)
+        # Three oldest (days_old=4,3,2) should be deleted.
+        for sid in ("4" * 32, "3" * 32, "2" * 32):
+            self.assertIn(sid, result["deleted"])
+            self.assertEqual(result["reasons"][sid], "cap")
+        # Two newest survive.
+        self.assertTrue((self.dir / ("0" * 32 + ".json")).exists())
+        self.assertTrue((self.dir / ("1" * 32 + ".json")).exists())
+
+    def test_ttl_takes_precedence_over_cap(self) -> None:
+        # Mix: 2 ancient (TTL) + 3 fresh (within cap).
+        self._seed("a" * 32, days_old=60)
+        self._seed("b" * 32, days_old=50)
+        self._seed("0" * 32, days_old=0)
+        self._seed("1" * 32, days_old=1)
+        self._seed("2" * 32, days_old=2)
+
+        result = self.store.cleanup_expired(max_age_days=30, max_count=100)
+
+        self.assertEqual(set(result["deleted"]), {"a" * 32, "b" * 32})
+        self.assertTrue(all(r == "ttl" for r in result["reasons"].values()))
+
+    def test_corrupt_files_are_deleted(self) -> None:
+        sid = "c" * 32
+        (self.dir / f"{sid}.json").write_text("not json{{{", encoding="utf-8")
+
+        result = self.store.cleanup_expired()
+
+        self.assertIn(sid, result["deleted"])
+        self.assertEqual(result["reasons"][sid], "corrupt")
+        self.assertFalse((self.dir / f"{sid}.json").exists())
+
+    def test_files_without_session_id_pattern_are_left_alone(self) -> None:
+        (self.dir / "not-a-session.json").write_text("{}", encoding="utf-8")
+        (self.dir / "README.txt").write_text("docs", encoding="utf-8")
+
+        result = self.store.cleanup_expired()
+
+        self.assertEqual(result["deleted"], [])
+        self.assertTrue((self.dir / "not-a-session.json").exists())
+        self.assertTrue((self.dir / "README.txt").exists())
+
+
+class AgentInitCleanupTest(unittest.TestCase):
+    """AdaptiveAgent.__init__이 cleanup을 옵션대로 호출하는지."""
+
+    def test_init_runs_cleanup_when_enabled(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from adaptive_agent.agent import AdaptiveAgent
+        from adaptive_agent.config import AgentConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            session_dir = workspace / ".adaptive_agent" / "sessions"
+            session_dir.mkdir(parents=True)
+            old_id = "f" * 32
+            ts = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat().replace("+00:00", "Z")
+            (session_dir / f"{old_id}.json").write_text(
+                json.dumps({"session_id": old_id, "status": "pending", "updated_at": ts}),
+                encoding="utf-8",
+            )
+
+            class _StubLLM:
+                def complete(self, _p):  # noqa: D401
+                    return "ok"
+
+            agent = AdaptiveAgent(
+                config=AgentConfig(
+                    workspace_dir=workspace,
+                    tool_library_dir=workspace / ".adaptive_agent" / "tools",
+                    session_dir=session_dir,
+                ),
+                llm_client=_StubLLM(),
+            )
+
+            self.assertIn(old_id, agent._cleanup_summary["deleted"])
+            self.assertFalse((session_dir / f"{old_id}.json").exists())
+
+    def test_init_skips_cleanup_when_disabled(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from adaptive_agent.agent import AdaptiveAgent
+        from adaptive_agent.config import AgentConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            session_dir = workspace / ".adaptive_agent" / "sessions"
+            session_dir.mkdir(parents=True)
+            old_id = "9" * 32
+            ts = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat().replace("+00:00", "Z")
+            (session_dir / f"{old_id}.json").write_text(
+                json.dumps({"session_id": old_id, "status": "pending", "updated_at": ts}),
+                encoding="utf-8",
+            )
+
+            class _StubLLM:
+                def complete(self, _p):  # noqa: D401
+                    return "ok"
+
+            agent = AdaptiveAgent(
+                config=AgentConfig(
+                    workspace_dir=workspace,
+                    tool_library_dir=workspace / ".adaptive_agent" / "tools",
+                    session_dir=session_dir,
+                    session_cleanup_enabled=False,
+                ),
+                llm_client=_StubLLM(),
+            )
+
+            self.assertEqual(agent._cleanup_summary["deleted"], [])
+            self.assertTrue((session_dir / f"{old_id}.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
