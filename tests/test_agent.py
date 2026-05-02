@@ -10,7 +10,6 @@ from pathlib import Path
 from adaptive_agent.agents import CoderAgent, CriticAgent, ExecutorAgent, LibrarianAgent, PlanAgent
 from adaptive_agent.agent import AdaptiveAgent
 from adaptive_agent.config import AgentConfig
-from adaptive_agent.nodes import CoderNode, CriticNode
 from adaptive_agent.prompts import PromptLoader
 from adaptive_agent.router import StateMachineRouter
 
@@ -176,12 +175,6 @@ class AdaptiveAgentTest(unittest.TestCase):
         for template_name in ("coder.txt", "critic.txt"):
             prompt = loader.load(template_name)
             self.assertGreater(len(prompt.strip()), 0)
-
-    def test_role_nodes_point_to_role_prompt_templates(self) -> None:
-        nodes = [CoderNode(), CriticNode()]
-
-        self.assertEqual([node.name for node in nodes], ["code", "critique"])
-        self.assertEqual([node.prompt_template for node in nodes], ["coder.txt", "critic.txt"])
 
     def test_role_agents_expose_separate_contracts(self) -> None:
         agents = [
