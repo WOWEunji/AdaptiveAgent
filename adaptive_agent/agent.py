@@ -84,6 +84,7 @@ class AdaptiveAgent:
         self.executor = executor or ToolExecutor(self.registry)
         self.prompt_loader = prompt_loader or PromptLoader()
         self.session_store = SessionStore(self.config.session_dir)
+        self._cleanup_summary: dict[str, Any] = self._maybe_cleanup_sessions()
         self.skill_catalog = SkillCatalog(self.config.tool_library_dir)
         self.router = StateMachineRouter(
             RouterDependencies(
@@ -98,6 +99,20 @@ class AdaptiveAgent:
                 max_steps=self.config.max_router_steps,
             )
         )
+
+    def _maybe_cleanup_sessions(self) -> dict[str, Any]:
+        """Run TTL/count cleanup if enabled in config, return the summary."""
+
+        if not self.config.session_cleanup_enabled:
+            return {"deleted": [], "reasons": {}}
+        try:
+            return self.session_store.cleanup_expired(
+                max_age_days=self.config.session_max_age_days,
+                max_count=self.config.session_max_count,
+            )
+        except OSError:
+            # Non-fatal: agent must boot even if the sessions dir is unreadable.
+            return {"deleted": [], "reasons": {}}
 
     def list_tools(self) -> list:
         """Return currently registered tools."""

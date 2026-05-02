@@ -32,6 +32,9 @@ class AgentConfig:
     session_dir: Path = Path.cwd() / ".adaptive_agent" / "sessions"
     max_self_corrections: int = 2
     max_router_steps: int = 8
+    session_cleanup_enabled: bool = True
+    session_max_age_days: int = 30
+    session_max_count: int = 100
     ollama_timeout_seconds: float = 60.0
     ollama_num_predict: int = 256
     ollama_think: bool = False
@@ -79,6 +82,9 @@ class AgentConfig:
             session_dir=session_dir,
             max_self_corrections=int(os.getenv("ADAPTIVE_AGENT_MAX_SELF_CORRECTIONS", "2")),
             max_router_steps=int(os.getenv("ADAPTIVE_AGENT_MAX_ROUTER_STEPS", "8")),
+            session_cleanup_enabled=os.getenv("ADAPTIVE_AGENT_SESSION_CLEANUP", "true").strip().lower() in {"1", "true", "yes", "on"},
+            session_max_age_days=int(os.getenv("ADAPTIVE_AGENT_SESSION_MAX_AGE_DAYS", "30")),
+            session_max_count=int(os.getenv("ADAPTIVE_AGENT_SESSION_MAX_COUNT", "100")),
             ollama_timeout_seconds=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60")),
             ollama_num_predict=int(os.getenv("OLLAMA_NUM_PREDICT", "256")),
             ollama_think=os.getenv("OLLAMA_THINK", "false").strip().lower() in {"1", "true", "yes", "on"},
