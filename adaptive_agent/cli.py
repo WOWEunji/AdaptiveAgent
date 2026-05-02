@@ -70,6 +70,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="재개한 pending 세션에 전달할 추가 입력",
     )
+    parser.add_argument(
+        "--perspectives",
+        default=None,
+        help=(
+            "콤마 구분 페르소나 키 (예: r,p,a 또는 researcher,pm,architect). "
+            "지정 시 task를 각 페르소나별로 병렬 실행하고 결과를 묶어서 반환. "
+            "implementer는 거부됨."
+        ),
+    )
     return parser
 
 
@@ -141,6 +150,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("사용자 입력 원문 보존을 위해 task 전체를 따옴표로 감싸 하나의 인자로 전달하세요.")
 
     task = args.task[0]
+
+    if args.perspectives:
+        try:
+            results = agent.run_perspectives(task, args.perspectives)
+        except ValueError as exc:
+            if args.json:
+                print(json.dumps({"success": False, "error": str(exc), "action": "perspective_error"}, ensure_ascii=False, indent=2))
+            else:
+                print(f"perspective 실행 실패: {exc}")
+            return 1
+        if args.json:
+            payload = {
+                key: _result_to_dict(response)
+                for key, response in results.items()
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            for key, response in results.items():
+                print(f"\n=== [{key}] ===")
+                _print_result(response, as_json=False)
+        return 0
+
     result = agent.run(task)
     _print_result(result, args.json)
     return 0
