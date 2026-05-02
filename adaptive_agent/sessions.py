@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +75,65 @@ class SessionStore:
         payload["status"] = status
         payload["updated_at"] = _utc_now()
         self._path_for(session_id).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def cleanup(self, *, ttl_hours: int, max_count: int) -> list[str]:
+        """Delete expired and excess session files.
+
+        Applies TTL eviction first (based on ``updated_at`` / ``created_at``),
+        then enforces the count cap by removing the oldest remaining files.
+        Returns the list of deleted ``session_id`` values.
+        """
+
+        if not self.sessions_dir.exists():
+            return []
+
+        session_files = list(self.sessions_dir.glob("*.json"))
+        deleted: list[str] = []
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
+
+        # TTL pass: delete files whose last-touch timestamp is before cutoff
+        survivors: list[tuple[datetime, Path]] = []
+        for path in session_files:
+            ts = self._session_timestamp(path)
+            if ts is not None and ts < cutoff:
+                try:
+                    path.unlink(missing_ok=True)
+                    deleted.append(path.stem)
+                except OSError:
+                    pass
+            else:
+                survivors.append((ts or datetime.min.replace(tzinfo=timezone.utc), path))
+
+        # Count cap pass: if still over limit, remove oldest by timestamp
+        if len(survivors) > max_count:
+            survivors.sort(key=lambda item: item[0])
+            for _, path in survivors[: len(survivors) - max_count]:
+                try:
+                    path.unlink(missing_ok=True)
+                    deleted.append(path.stem)
+                except OSError:
+                    pass
+
+        return deleted
+
+    @staticmethod
+    def _session_timestamp(path: Path) -> datetime | None:
+        """Return the ``updated_at`` / ``created_at`` timestamp of a session file."""
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        for field in ("updated_at", "created_at"):
+            raw = payload.get(field)
+            if isinstance(raw, str):
+                try:
+                    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                    return dt.astimezone(timezone.utc)
+                except ValueError:
+                    continue
+        return None
 
     def _path_for(self, session_id: str) -> Path:
         if not _SESSION_ID_PATTERN.match(session_id):

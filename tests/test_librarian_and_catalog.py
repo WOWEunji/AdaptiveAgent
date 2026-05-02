@@ -93,6 +93,20 @@ class SkillCatalogRecordUsageTest(unittest.TestCase):
         self.assertEqual(entry["usage_count"], 1)
         self.assertEqual(entry["failure_count"], 1)
 
+    def test_upsert_preserves_stats_on_reapproval(self) -> None:
+        """Re-upserting a tool preserves accumulated usage/failure counts."""
+
+        self.catalog.record_usage("counter_tool", success=True)
+        self.catalog.record_usage("counter_tool", success=False)
+
+        # Re-upsert with new description (simulating re-approval)
+        entry = self.catalog._find_existing("counter_tool")
+        updated = self.catalog.upsert({**entry, "description": "updated description"})
+
+        self.assertEqual(updated["usage_count"], 2)
+        self.assertEqual(updated["failure_count"], 1)
+        self.assertEqual(updated["description"], "updated description")
+
 
 class SkillCatalogFindStaleEntriesTest(unittest.TestCase):
     def setUp(self) -> None:

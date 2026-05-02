@@ -33,6 +33,7 @@ class ToolRegistry:
 def create_default_registry(
     workspace_dir: Path | None = None,
     tool_library_dir: Path | None = None,
+    artifact_dir: Path | None = None,
 ) -> ToolRegistry:
     """Create the default builtin tool registry."""
 
@@ -41,6 +42,7 @@ def create_default_registry(
     workspace = raw_workspace.resolve()
     tool_library = (tool_library_dir or workspace / ".adaptive_agent" / "tools").resolve()
     memory_dir = workspace / ".adaptive_agent" / "memory"
+    _artifact_dir = (artifact_dir or workspace / ".adaptive_agent" / "artifacts").resolve()
     sandbox = LocalSandboxBackend(raw_workspace)
 
     def echo(arguments: dict[str, object]) -> ToolExecutionResult:
@@ -287,6 +289,26 @@ def create_default_registry(
             category="memory",
             safety_level="high",
             usage='python3 -m adaptive_agent --json --tool memory_write --arg key=preference --arg value="한국어 응답"',
+        )
+    )
+    registry.register(
+        Tool(
+            name="artifact_store",
+            description="실행 로그, diff, 생성 파일을 로컬 artifact 디렉터리에 저장합니다.",
+            handler=lambda arguments: builtins.artifact_store(arguments, artifact_dir=_artifact_dir),
+            category="io",
+            safety_level="medium",
+            usage='python3 -m adaptive_agent --json --tool artifact_store --arg name=result.txt --arg content="..."',
+        )
+    )
+    registry.register(
+        Tool(
+            name="web_fetch",
+            description="HTTP/HTTPS URL을 가져와 status_code와 body를 반환합니다. http/https만 허용, 응답 크기 1MB 제한.",
+            handler=builtins.web_fetch,
+            category="network",
+            safety_level="medium",
+            usage='python3 -m adaptive_agent --json --tool web_fetch --arg url=https://example.com',
         )
     )
     registry.register(

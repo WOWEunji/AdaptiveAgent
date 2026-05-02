@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+EmbeddingFn = Callable[[str], list[float]]
 
 
 MANIFEST_FILENAME = "manifest.json"
@@ -32,6 +35,7 @@ class SkillCatalog:
 
     tool_library: Path
     manifest_filename: str = MANIFEST_FILENAME
+    embedding_fn: EmbeddingFn | None = None
     _skills: list[dict[str, Any]] = field(default_factory=list, init=False)
 
     @property
@@ -44,12 +48,26 @@ class SkillCatalog:
         return list(self._load().get("tools", []))
 
     def search(self, query: str, *, top_k: int = 5) -> list[dict[str, Any]]:
-        """Return ranked approved tool metadata for a query."""
+        """Return ranked approved tool metadata for a query.
+
+        When ``embedding_fn`` is set and stored embeddings exist, uses cosine
+        similarity for ranking. Falls back to keyword scoring otherwise.
+        """
+
+        tools = self.list()
+        if self.embedding_fn is not None:
+            try:
+                query_vec = self.embedding_fn(query)
+                ranked = _rank_by_embedding(tools, query_vec)
+                if ranked:
+                    return ranked[: max(top_k, 0)]
+            except Exception:
+                pass  # embedding call failed — fall through to keyword search
 
         query_tokens = _tokens(query)
-        ranked: list[dict[str, Any]] = []
+        ranked_kw: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for tool in self.list():
+        for tool in tools:
             name = str(tool.get("name") or "")
             if not name or name in seen:
                 continue
@@ -57,14 +75,26 @@ class SkillCatalog:
             score = _score_tool(tool, query, query_tokens)
             if query_tokens and score <= 0:
                 continue
-            ranked.append({**tool, "score": score})
-        ranked.sort(key=lambda item: (-float(item.get("score", 0)), str(item.get("name", ""))))
-        return ranked[: max(top_k, 0)]
+            ranked_kw.append({**tool, "score": score})
+        ranked_kw.sort(key=lambda item: (-float(item.get("score", 0)), str(item.get("name", ""))))
+        return ranked_kw[: max(top_k, 0)]
 
     def upsert(self, metadata: dict[str, Any]) -> dict[str, Any]:
-        """Insert or replace approved tool metadata by name."""
+        """Insert or replace approved tool metadata by name.
+
+        When replacing an existing entry, ``usage_count``, ``failure_count``,
+        and ``created_at`` are preserved (via :meth:`_normalize`) so accumulated
+        stats survive re-approval. When ``embedding_fn`` is set, generates and
+        stores a fresh embedding vector for the tool's description.
+        """
 
         normalized = self._normalize(metadata)
+        if self.embedding_fn is not None:
+            text = f"{normalized['name']} {normalized['description']}"
+            try:
+                normalized["embedding"] = self.embedding_fn(text)
+            except Exception:
+                pass  # embedding failure must not block approval
         payload = self._load()
         tools = [tool for tool in payload.get("tools", []) if tool.get("name") != normalized["name"]]
         tools.append(normalized)
@@ -181,6 +211,11 @@ class SkillCatalog:
                 if isinstance(metadata.get("reflections"), list)
                 else existing.get("reflections", [])
             ),
+            "embedding": (
+                metadata.get("embedding")
+                if isinstance(metadata.get("embedding"), list)
+                else existing.get("embedding")
+            ),
         }
 
     def _find_existing(self, name: str) -> dict[str, Any]:
@@ -188,6 +223,36 @@ class SkillCatalog:
             if isinstance(tool, dict) and tool.get("name") == name:
                 return tool
         return {}
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Return cosine similarity in [-1, 1]; returns 0.0 on zero vectors."""
+
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _rank_by_embedding(tools: list[dict[str, Any]], query_vec: list[float]) -> list[dict[str, Any]]:
+    """Rank tools by cosine similarity to query_vec; skip tools without embedding."""
+
+    ranked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool in tools:
+        name = str(tool.get("name") or "")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        emb = tool.get("embedding")
+        if not isinstance(emb, list) or len(emb) != len(query_vec):
+            continue
+        sim = _cosine_similarity(query_vec, emb)
+        ranked.append({**tool, "score": sim})
+    ranked.sort(key=lambda item: (-float(item.get("score", 0)), str(item.get("name", ""))))
+    return ranked
 
 
 def _normalize_tags(raw_tags: object) -> list[str]:

@@ -16,7 +16,7 @@ class RouterDependencies:
 
     create_state: Callable[[], AgentState]
     plan_with_llm: Callable[[AgentState], dict[str, Any]]
-    run_normalized_plan: Callable[[str, dict[str, Any], AgentState], Any]
+    executor_agent: ExecutorAgent
     critique_execution: Callable[[AgentState], dict[str, Any]]
     make_response: Callable[..., Any]
     retrieve_skills: Callable[[AgentState], list[dict[str, Any]]] | None = None
@@ -36,7 +36,7 @@ class StateMachineRouter:
         )
         self.plan_agent = PlanAgent(dependencies.plan_with_llm)
         self.coder_agent = CoderAgent(dependencies.code_with_llm)
-        self.executor_agent = ExecutorAgent(dependencies.run_normalized_plan)
+        self.executor_agent = dependencies.executor_agent
         self.critic_agent = CriticAgent(dependencies.critique_execution)
         self.last_state: AgentState | None = None
 

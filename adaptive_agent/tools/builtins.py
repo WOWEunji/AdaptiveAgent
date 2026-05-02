@@ -7,6 +7,8 @@ import difflib
 import hashlib
 import json
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -480,22 +482,98 @@ def memory_write(arguments: dict[str, object], *, memory_dir: Path) -> ToolExecu
     return ToolExecutionResult(success=True, output=payload)
 
 
-def suggested_builtin_tools(_arguments: dict[str, object]) -> ToolExecutionResult:
-    """Return candidate builtin tools for future core expansion."""
+def artifact_store(arguments: dict[str, object], *, artifact_dir: Path) -> ToolExecutionResult:
+    """Save execution artifacts (logs, diffs, generated files) to a named path.
+
+    Args:
+        arguments: ``name`` (str) — filename; ``content`` (str) — text to store;
+            ``session_id`` (str, optional) — groups artifacts under a subdirectory.
+        artifact_dir: Root directory for artifact storage.
+    """
+
+    name = str(arguments.get("name") or "").strip()
+    content = str(arguments.get("content") or "")
+    session_id = str(arguments.get("session_id") or "").strip()
+
+    if not name:
+        return ToolExecutionResult(success=False, output={}, error="name 인자가 필요합니다.")
+    # Prevent path traversal: strip leading slashes and reject ".." components
+    safe_name = re.sub(r"[/\\]", "_", name).lstrip(".")
+    if not safe_name:
+        return ToolExecutionResult(success=False, output={}, error=f"유효하지 않은 파일 이름입니다: {name!r}")
+
+    target_dir = artifact_dir / session_id if session_id else artifact_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / safe_name
+    target_path.write_text(content, encoding="utf-8")
 
     return ToolExecutionResult(
         success=True,
-        output=[
-            {
-                "name": "artifact_store",
-                "reason": "실행 로그, diff, 생성 파일을 PR/리포트에 연결할 수 있는 산출물 저장 계층이 필요합니다.",
-            },
-            {
-                "name": "web_fetch",
-                "reason": "공식 문서 확인이 필요한 구현에서 네트워크 조회를 명시적인 도구로 분리할 수 있습니다.",
-            },
-        ],
+        output={"path": str(target_path), "size": len(content.encode("utf-8"))},
     )
+
+
+_MAX_WEB_FETCH_BYTES = 1 * 1024 * 1024  # 1 MB
+_ALLOWED_SCHEMES = {"http", "https"}
+
+
+def web_fetch(arguments: dict[str, object]) -> ToolExecutionResult:
+    """Fetch a URL and return the HTTP status code and response body.
+
+    Only ``http`` and ``https`` schemes are allowed. The response body is
+    truncated at 1 MB to prevent unbounded memory use.
+
+    Args:
+        arguments: ``url`` (str); ``method`` (str, default ``GET``);
+            ``timeout`` (int | float, default 10 seconds).
+    """
+
+    url = str(arguments.get("url") or "").strip()
+    method = str(arguments.get("method") or "GET").strip().upper()
+    try:
+        timeout = float(arguments.get("timeout") or 10)
+    except (TypeError, ValueError):
+        timeout = 10.0
+
+    if not url:
+        return ToolExecutionResult(success=False, output={}, error="url 인자가 필요합니다.")
+
+    # Scheme check before making any network connection
+    scheme = url.split("://")[0].lower() if "://" in url else ""
+    if scheme not in _ALLOWED_SCHEMES:
+        return ToolExecutionResult(
+            success=False,
+            output={},
+            error=f"허용되지 않는 URL scheme입니다 (http/https만 허용): {scheme!r}",
+        )
+
+    try:
+        req = urllib.request.Request(url, method=method)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — scheme already checked
+            status_code: int = resp.status
+            raw = resp.read(_MAX_WEB_FETCH_BYTES)
+        encoding = "utf-8"
+        body = raw.decode(encoding, errors="replace")
+        return ToolExecutionResult(
+            success=True,
+            output={"status_code": status_code, "body": body, "truncated": len(raw) >= _MAX_WEB_FETCH_BYTES},
+        )
+    except urllib.error.HTTPError as exc:
+        return ToolExecutionResult(
+            success=False,
+            output={"status_code": exc.code},
+            error=f"HTTP {exc.code}: {exc.reason}",
+        )
+    except urllib.error.URLError as exc:
+        return ToolExecutionResult(success=False, output={}, error=f"URL 오류: {exc.reason}")
+    except TimeoutError:
+        return ToolExecutionResult(success=False, output={}, error=f"요청 시간 초과 ({timeout}초)")
+
+
+def suggested_builtin_tools(_arguments: dict[str, object]) -> ToolExecutionResult:
+    """Return candidate builtin tools for future core expansion."""
+
+    return ToolExecutionResult(success=True, output=[])
 
 
 def _result_from_process(process_output: dict[str, object], arguments: dict[str, object]) -> ToolExecutionResult:

@@ -501,13 +501,43 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertTrue(read_result.success)
         self.assertEqual(read_result.output["value"], "한국어")
 
-    def test_suggest_builtin_tools_includes_remaining_candidates(self) -> None:
+    def test_suggest_builtin_tools_returns_empty_list(self) -> None:
         result = self.run_tool("suggest_builtin_tools", {})
 
         self.assertTrue(result.success)
-        names = {candidate["name"] for candidate in result.output}
-        self.assertIn("artifact_store", names)
-        self.assertIn("web_fetch", names)
+        self.assertEqual(result.output, [])
+
+    def test_artifact_store_saves_file_and_returns_path(self) -> None:
+        result = self.run_tool("artifact_store", {"name": "output.txt", "content": "hello world"})
+
+        self.assertTrue(result.success)
+        saved_path = Path(result.output["path"])
+        self.assertTrue(saved_path.exists())
+        self.assertEqual(saved_path.read_text(encoding="utf-8"), "hello world")
+
+    def test_artifact_store_groups_by_session_id(self) -> None:
+        result = self.run_tool("artifact_store", {"name": "log.txt", "content": "data", "session_id": "sess01"})
+
+        self.assertTrue(result.success)
+        self.assertIn("sess01", result.output["path"])
+
+    def test_artifact_store_rejects_empty_name(self) -> None:
+        result = self.run_tool("artifact_store", {"name": "", "content": "data"})
+
+        self.assertFalse(result.success)
+        self.assertIn("name", result.error)
+
+    def test_web_fetch_rejects_non_http_scheme(self) -> None:
+        result = self.run_tool("web_fetch", {"url": "ftp://example.com/file"})
+
+        self.assertFalse(result.success)
+        self.assertIn("ftp", result.error)
+
+    def test_web_fetch_rejects_empty_url(self) -> None:
+        result = self.run_tool("web_fetch", {"url": ""})
+
+        self.assertFalse(result.success)
+        self.assertIn("url", result.error)
 
 
 if __name__ == "__main__":

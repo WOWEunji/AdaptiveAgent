@@ -70,6 +70,7 @@ class AgentState:
     session_status: str = "running"
     failure_count: int = 0
     summary: str = ""
+    parallel_results: list[dict[str, Any]] = field(default_factory=list)
 
     def record_event(self, name: str, **details: Any) -> None:
         """Append an ordered execution event."""

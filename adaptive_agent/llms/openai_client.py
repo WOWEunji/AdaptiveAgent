@@ -106,6 +106,7 @@ class OpenAIClient:
             response = client.chat.completions.create(
                 model=self._model,
                 messages=[{"role": "user", "content": prompt}],
+                temperature=0,
             )
             choice = response.choices[0].message.content
             return (choice if choice is not None else "").strip()

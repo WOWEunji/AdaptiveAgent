@@ -15,6 +15,7 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
+from adaptive_agent.agents.executor import ExecutorAgent, ExecutorDependencies
 from adaptive_agent.router import RouterDependencies, StateMachineRouter
 from adaptive_agent.state import AgentState
 
@@ -61,20 +62,43 @@ class _RouterHarness:
             self.critic_calls_made += 1
             return self.critic_outputs.pop(0) if self.critic_outputs else {"verdict": "success", "next_node": "done"}
 
-        def run_normalized_plan(_task: str, _plan: dict[str, Any], state: AgentState) -> Any:
-            self.executor_calls_made += 1
-            if self._executor_raises is not None:
-                raise self._executor_raises
-            state.last_tool_result = {"success": True, "output": "stub"}
-            state.last_tool_name = _plan.get("tool_name")
-            # 다음 라우팅을 critique로 보내고, 즉시 응답은 만들지 않는다 (None == 계속).
+        harness_self = self
+        _resp = executor_response
+        _raises = executor_raises
+
+        def _fake_run_tool(tool_name: str, arguments: dict[str, Any], *, _state: AgentState | None = None) -> Any:
+            harness_self.executor_calls_made += 1
+            if _raises is not None:
+                raise _raises
+            if _state is not None:
+                _state.last_tool_result = {"success": True, "output": "stub"}
+                _state.last_tool_name = tool_name
+                _state.next_node = "critique"
+
+            class _Result:
+                success = True
+                output = "stub"
+                error = None
+
+            return _Result()
+
+        def _fake_handle_success(task: str, tool_name: str, output: Any, state: AgentState) -> Any:
             state.next_node = "critique"
-            return self._executor_response
+            return _resp
+
+        executor_agent = ExecutorAgent(
+            ExecutorDependencies(
+                run_tool=_fake_run_tool,
+                handle_success=_fake_handle_success,
+                plan_correction=lambda *_a, **_kw: {"action": "respond", "response": "corrected"},
+                max_self_corrections=0,
+            )
+        )
 
         self.deps = RouterDependencies(
             create_state=_create_state,
             plan_with_llm=plan_with_llm,
-            run_normalized_plan=run_normalized_plan,
+            executor_agent=executor_agent,
             critique_execution=critique_execution,
             make_response=_make_response,
             max_steps=max_steps,

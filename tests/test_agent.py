@@ -7,11 +7,13 @@ import unittest
 import tempfile
 from pathlib import Path
 
-from adaptive_agent.agents import CoderAgent, CriticAgent, ExecutorAgent, LibrarianAgent, PlanAgent
+from adaptive_agent.agents import CoderAgent, CriticAgent, LibrarianAgent, PlanAgent
+from adaptive_agent.agents.executor import ExecutorAgent, ExecutorDependencies
 from adaptive_agent.agent import AdaptiveAgent
 from adaptive_agent.config import AgentConfig
 from adaptive_agent.prompts import PromptLoader
 from adaptive_agent.router import StateMachineRouter
+from adaptive_agent.state import AgentState
 
 
 class StubLLM:
@@ -177,11 +179,17 @@ class AdaptiveAgentTest(unittest.TestCase):
             self.assertGreater(len(prompt.strip()), 0)
 
     def test_role_agents_expose_separate_contracts(self) -> None:
+        _noop_deps = ExecutorDependencies(
+            run_tool=lambda *_a, **_kw: None,
+            handle_success=lambda *_a, **_kw: None,
+            plan_correction=lambda *_a, **_kw: {},
+            max_self_corrections=0,
+        )
         agents = [
             LibrarianAgent(),
             PlanAgent(lambda _state: {"action": "respond", "response": "ok"}),
             CoderAgent(),
-            ExecutorAgent(lambda _task, _plan, _state: None),
+            ExecutorAgent(_noop_deps),
             CriticAgent(),
         ]
 
@@ -394,6 +402,43 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertEqual(result.output, "재계획 완료")
         self.assertGreaterEqual(event_names.count("task_analyzed"), 2)
         self.assertIn("execution_critiqued", event_names)
+
+    def test_critic_reflection_is_appended_to_state(self) -> None:
+        """CriticAgent.run()이 verdict의 reflection을 state.reflections에 추가하는 계약."""
+
+        state = AgentState()
+        state.last_tool_result = {"success": True, "output": "ok"}
+        critic = CriticAgent(lambda _s: {
+            "verdict": "retry",
+            "reason": "needs fix",
+            "reflection": "이전 시도에서 타임아웃 발생",
+            "next_node": "plan",
+        })
+
+        critic.run(state)
+
+        self.assertIn("이전 시도에서 타임아웃 발생", state.reflections)
+
+    def test_critic_reflection_appears_in_next_plan_prompt(self) -> None:
+        """Critic이 추가한 reflection이 다음 plan 프롬프트에 포함되는 계약."""
+
+        llm = SequenceLLM(
+            [
+                '{"action":"tool","tool_name":"echo","arguments":{"task":"test"}}',
+                '{"verdict":"retry","reason":"fix needed","reflection":"이전 결과가 불완전함","next_node":"plan"}',
+                '{"action":"final_answer","answer":"완료"}',
+            ]
+        )
+        agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+
+        agent.run("reflection 전달 확인 작업")
+
+        # 세 번째 LLM 호출(retry 후 재계획)의 프롬프트에 reflection 텍스트가 있어야 한다
+        plan_prompts_after_retry = [p for p in llm.prompts if "이전 결과가 불완전함" in p]
+        self.assertTrue(
+            plan_prompts_after_retry,
+            "Critic reflection이 재계획 프롬프트에 포함되어야 합니다",
+        )
 
     def test_router_step_limit_stops_repeating_loops(self) -> None:
         agent = AdaptiveAgent(config=AgentConfig(max_router_steps=3), llm_client=AlternatingRetryLLM())
@@ -661,6 +706,71 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertIsNone(state.last_tool_result)
         self.assertEqual(state.reflections, [])
         self.assertEqual(state.next_node, "plan")
+
+
+class ParallelPlanNormalizationTest(unittest.TestCase):
+    def _make_agent(self, llm_response: str) -> AdaptiveAgent:
+        return AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM(llm_response))
+
+    def test_actions_list_normalizes_to_parallel_plan(self) -> None:
+        agent = self._make_agent("")
+        parsed = {
+            "actions": [
+                {"action": "tool", "tool_name": "echo", "arguments": {"task": "a"}},
+                {"action": "tool", "tool_name": "echo", "arguments": {"task": "b"}},
+            ]
+        }
+        plan = agent._normalize_plan(parsed, fallback_response="fallback")
+
+        self.assertEqual(plan["action"], "parallel")
+        self.assertEqual(len(plan["actions"]), 2)
+        self.assertTrue(all(p["action"] == "tool" for p in plan["actions"]))
+
+    def test_actions_list_filters_non_tool_sub_plans(self) -> None:
+        agent = self._make_agent("")
+        parsed = {
+            "actions": [
+                {"action": "tool", "tool_name": "echo", "arguments": {}},
+                {"action": "respond", "response": "hello"},
+            ]
+        }
+        plan = agent._normalize_plan(parsed, fallback_response="fallback")
+
+        self.assertEqual(plan["action"], "parallel")
+        self.assertEqual(len(plan["actions"]), 1)
+
+    def test_empty_actions_list_falls_through_to_normal_normalization(self) -> None:
+        agent = self._make_agent("")
+        parsed = {"actions": [], "action": "respond", "response": "hi"}
+        plan = agent._normalize_plan(parsed, fallback_response="fallback")
+
+        self.assertNotEqual(plan.get("action"), "parallel")
+
+    def test_parallel_plan_end_to_end_via_agent_run(self) -> None:
+        llm_response = json.dumps({
+            "actions": [
+                {"action": "tool", "tool_name": "echo", "arguments": {"task": "first"}},
+                {"action": "tool", "tool_name": "echo", "arguments": {"task": "second"}},
+            ]
+        })
+        agent = AdaptiveAgent(
+            config=AgentConfig(max_self_corrections=0),
+            llm_client=StubLLM(llm_response),
+        )
+
+        result = agent.run("두 작업 병렬 실행")
+
+        self.assertEqual(result.action, "parallel")
+        self.assertIsInstance(result.output, list)
+        self.assertEqual(len(result.output), 2)
+        tool_names = {r["tool_name"] for r in result.output}
+        self.assertEqual(tool_names, {"echo"})
+        self.assertTrue(all(r["success"] for r in result.output))
+        event_names = [e.name for e in result.events]
+        self.assertIn("parallel_execution_completed", event_names)
+        completed = next(e for e in result.events if e.name == "parallel_execution_completed")
+        self.assertEqual(completed.details["action_count"], 2)
+        self.assertEqual(completed.details["success_count"], 2)
 
 
 if __name__ == "__main__":

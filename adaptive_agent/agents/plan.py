@@ -38,7 +38,7 @@ class PlanAgent(BaseRoleAgent):
             and not isinstance(arguments.get("code"), str)
         ):
             next_node = "code"
-        elif plan.get("action") == "tool":
+        elif plan.get("action") in {"tool", "parallel"}:
             next_node = "execute"
         elif plan.get("needs_user_input"):
             next_node = "approve"
