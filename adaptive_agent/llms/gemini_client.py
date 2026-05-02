@@ -46,6 +46,11 @@ class GeminiClient:
 
         return self.generate(prompt)
 
+    def stream(self, prompt: str):
+        """Single-chunk fallback (Gemini SDK streaming은 별도 issue)."""
+
+        yield self.generate(prompt)
+
     def generate(self, prompt: str) -> str:
         from google import genai
 

@@ -125,6 +125,27 @@ class OpenAIClient:
 
         return self.generate(prompt)
 
+    def stream(self, prompt: str):
+        """Stream OpenAI Chat Completions chunks (Responses API falls back to single chunk)."""
+
+        from openai import OpenAI
+
+        if should_use_openai_responses_api(self._model):
+            # Responses API streaming은 SDK 차이 큼 — 안전한 single-chunk fallback
+            yield self.generate(prompt)
+            return
+        client = OpenAI(api_key=self._api_key)
+        stream = client.chat.completions.create(
+            model=self._model,
+            messages=[{"role": "user", "content": prompt}],
+            stream=True,
+        )
+        for chunk in stream:
+            for choice in chunk.choices:
+                delta = getattr(choice.delta, "content", None)
+                if delta:
+                    yield delta
+
 
 def create_openai_client(model: str, *, api_key: str | None = None) -> LLMClient:
     return OpenAIClient(model=model, api_key=api_key)

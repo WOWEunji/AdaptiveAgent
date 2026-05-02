@@ -70,6 +70,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="재개한 pending 세션에 전달할 추가 입력",
     )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help=(
+            "자연어 task의 LLM 응답을 stdout에 streaming. plan/JSON 흐름을 "
+            "건너뛰고 직접 LLM 응답을 chunk로 받음 (디버깅·체크에 유용)."
+        ),
+    )
     return parser
 
 
@@ -141,6 +149,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("사용자 입력 원문 보존을 위해 task 전체를 따옴표로 감싸 하나의 인자로 전달하세요.")
 
     task = args.task[0]
+
+    if args.stream:
+        # Stream mode bypasses agent planning. JSON output disabled in this mode.
+        try:
+            for chunk in agent.stream_response(task):
+                print(chunk, end="", flush=True)
+            print()
+        except Exception as exc:
+            print(f"\nstream 실패: {exc}")
+            return 1
+        return 0
+
     result = agent.run(task)
     _print_result(result, args.json)
     return 0

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Iterator
+
 from adaptive_agent.llms.base import LLMClient
 
 
@@ -43,6 +45,26 @@ class OllamaClient:
         """Compatibility completion method used by the agent core."""
 
         return self.generate(prompt)
+
+    def stream(self, prompt: str) -> Iterator[str]:
+        """Stream chunks from Ollama natively (chat with stream=True)."""
+
+        import ollama
+
+        client_kwargs = {"timeout": self.timeout_seconds}
+        if self.host:
+            client_kwargs["host"] = self.host
+        client = ollama.Client(**client_kwargs)
+        stream = client.chat(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0, "num_predict": self.num_predict},
+            stream=True,
+        )
+        for chunk in stream:
+            piece = chunk.get("message", {}).get("content", "")
+            if piece:
+                yield str(piece)
 
 
 def create_ollama_client(
