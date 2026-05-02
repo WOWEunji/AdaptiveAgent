@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from adaptive_agent.llms.base import LLMClient
+from adaptive_agent.llms.usage import LLMUsage
 
 
 class OllamaClient:
     """LLM client backed by a local Ollama model."""
+
+    last_usage: LLMUsage | None
 
     def __init__(
         self,
@@ -22,6 +25,7 @@ class OllamaClient:
         self.timeout_seconds = timeout_seconds
         self.num_predict = num_predict
         self.think = think
+        self.last_usage = None
 
     def generate(self, prompt: str) -> str:
         import ollama
@@ -37,6 +41,18 @@ class OllamaClient:
             options={"temperature": 0, "num_predict": self.num_predict},
             think=self.think,
         )
+        # Ollama returns prompt_eval_count and eval_count when available.
+        prompt_eval = int(response.get("prompt_eval_count") or 0)
+        eval_count = int(response.get("eval_count") or 0)
+        if prompt_eval or eval_count:
+            self.last_usage = LLMUsage.from_counts(
+                provider="ollama",
+                model=self.model,
+                input_tokens=prompt_eval,
+                output_tokens=eval_count,
+            )
+        else:
+            self.last_usage = None
         return str(response["message"]["content"])
 
     def complete(self, prompt: str) -> str:

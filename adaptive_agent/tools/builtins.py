@@ -424,8 +424,39 @@ def tool_approve(arguments: dict[str, object], *, tool_library: Path) -> ToolExe
 
     metadata.update({"status": "approved", "approved": True, "approval_status": "approved"})
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    catalog_metadata = SkillCatalog(tool_library).upsert(metadata)
+    catalog = SkillCatalog(tool_library)
+    catalog_metadata = catalog.upsert(metadata)
+
+    # Best-effort embedding: tool_approve가 embedder를 받지 않으면 skip.
+    # 실제 wiring은 registry에서 수행 (embedder 주입).
+    embedder = arguments.get("_embedder")
+    if embedder is not None:
+        text_for_embedding = f"{catalog_metadata.get('name', '')}\n{catalog_metadata.get('description', '')}"
+        try:
+            vector = embedder.embed(text_for_embedding)  # type: ignore[union-attr]
+        except Exception:
+            vector = None
+        if vector:
+            embedding_model = getattr(embedder, "model_id", "")
+            catalog_metadata = catalog.attach_embedding(
+                str(catalog_metadata.get("name") or ""),
+                vector,
+                embedding_model=embedding_model,
+            ) or catalog_metadata
     return ToolExecutionResult(success=True, output={"tool": metadata, "catalog": catalog_metadata})
+    catalog_diff = SkillCatalog(tool_library).upsert_with_diff(metadata)
+    return ToolExecutionResult(
+        success=True,
+        output={
+            "tool": metadata,
+            "catalog": catalog_diff["entry"],
+            "manifest_merge": {
+                "merged": catalog_diff["merged"],
+                "previous_usage_count": catalog_diff["previous_usage_count"],
+                "previous_failure_count": catalog_diff["previous_failure_count"],
+            },
+        },
+    )
 
 
 def tool_search(
@@ -433,14 +464,27 @@ def tool_search(
     *,
     registered_tools: list[dict[str, Any]],
     tool_library: Path,
+    embedder: object | None = None,
+    embedding_threshold: float = 0.4,
 ) -> ToolExecutionResult:
-    """Search registered and approved generated-tool metadata."""
+    """Search registered and approved generated-tool metadata.
+
+    ``mode`` argument: ``keyword`` (default) / ``semantic`` / ``auto``.
+    ``auto``는 embedder가 주입되었을 때만 semantic, 아니면 keyword로 폴백.
+    """
 
     query = str(arguments.get("query") or "").casefold()
     top_k = _coerce_int(arguments.get("top_k"), default=10, minimum=1, maximum=50)
-    generated_tools = SkillCatalog(tool_library).search(query, top_k=top_k)
+    mode = str(arguments.get("mode") or "keyword").lower().strip()
+    generated_tools = SkillCatalog(tool_library).search(
+        query,
+        top_k=top_k,
+        mode=mode,
+        embedder=embedder,
+        threshold=embedding_threshold,
+    )
     candidates = _dedupe_tool_candidates(registered_tools + generated_tools)
-    if query:
+    if query and mode in {"keyword", "auto"} and not (mode == "auto" and embedder is not None):
         candidates = [
             tool
             for tool in candidates
@@ -449,7 +493,10 @@ def tool_search(
             or query in str(tool.get("category", "")).casefold()
             or float(tool.get("score", 0) or 0) > 0
         ]
-    return ToolExecutionResult(success=True, output={"query": query, "top_k": top_k, "matches": candidates[:top_k]})
+    return ToolExecutionResult(
+        success=True,
+        output={"query": query, "top_k": top_k, "mode": mode, "matches": candidates[:top_k]},
+    )
 
 
 def memory_read(arguments: dict[str, object], *, memory_dir: Path) -> ToolExecutionResult:
@@ -483,19 +530,311 @@ def memory_write(arguments: dict[str, object], *, memory_dir: Path) -> ToolExecu
 def suggested_builtin_tools(_arguments: dict[str, object]) -> ToolExecutionResult:
     """Return candidate builtin tools for future core expansion."""
 
+    # artifact_store / web_fetch는 이제 실제 핸들러로 등록되었지만, 후보
+    # 목록은 향후 확장 가이드를 위해 유지한다 (artifact_search, mcp_bridge 등).
     return ToolExecutionResult(
         success=True,
         output=[
             {
-                "name": "artifact_store",
-                "reason": "실행 로그, diff, 생성 파일을 PR/리포트에 연결할 수 있는 산출물 저장 계층이 필요합니다.",
+                "name": "artifact_search",
+                "reason": "저장된 artifact를 query/태그로 검색하는 보조 도구가 필요합니다.",
             },
             {
-                "name": "web_fetch",
-                "reason": "공식 문서 확인이 필요한 구현에서 네트워크 조회를 명시적인 도구로 분리할 수 있습니다.",
+                "name": "mcp_bridge",
+                "reason": "외부 MCP 서버의 도구를 동적 등록할 수 있는 어댑터가 필요합니다.",
             },
         ],
     )
+
+
+_ARTIFACT_OPS = {"put", "get", "list", "delete"}
+_ARTIFACT_DIRNAME = ".adaptive_agent/artifacts"
+
+
+def artifact_store(
+    arguments: dict[str, object],
+    *,
+    workspace: Path,
+    max_bytes: int = 10 * 1024 * 1024,
+    max_count: int = 1000,
+) -> ToolExecutionResult:
+    """Persist binary/text artifacts under the workspace with sha256 IDs.
+
+    Supported ops:
+
+    - ``put``: write bytes (or base64-encoded ``content_base64`` /
+      utf8 ``content``) and return ``{artifact_id, sha256, bytes_written, path}``.
+    - ``get``: read by ``artifact_id``; returns ``{artifact_id, mime_type,
+      content_base64, bytes}``.
+    - ``list``: enumerate stored artifacts with metadata.
+    - ``delete``: remove by ``artifact_id``.
+
+    Each artifact is stored as ``<workspace>/.adaptive_agent/artifacts/<sha256>.bin``
+    plus a sibling ``.json`` with ``{name, mime_type, sha256, bytes, created_at}``.
+    """
+
+    op = str(arguments.get("op") or "put").lower()
+    if op not in _ARTIFACT_OPS:
+        return ToolExecutionResult(success=False, output="", error=f"지원하지 않는 op입니다: {op} (지원: {sorted(_ARTIFACT_OPS)})")
+
+    artifacts_dir = (workspace / _ARTIFACT_DIRNAME).resolve()
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    if op == "put":
+        return _artifact_put(arguments, artifacts_dir=artifacts_dir, max_bytes=max_bytes, max_count=max_count)
+    if op == "get":
+        return _artifact_get(arguments, artifacts_dir=artifacts_dir)
+    if op == "list":
+        return _artifact_list(artifacts_dir=artifacts_dir, prefix=str(arguments.get("prefix") or ""))
+    return _artifact_delete(arguments, artifacts_dir=artifacts_dir)
+
+
+def _artifact_put(
+    arguments: dict[str, object],
+    *,
+    artifacts_dir: Path,
+    max_bytes: int,
+    max_count: int,
+) -> ToolExecutionResult:
+    import base64
+
+    name = str(arguments.get("name") or "")
+    if not name or "/" in name or ".." in name:
+        return ToolExecutionResult(success=False, output="", error="name은 디렉터리 구분자/.. 없는 단일 토큰이어야 합니다.")
+    mime_type = str(arguments.get("mime_type") or "application/octet-stream")
+
+    raw_content = arguments.get("content")
+    raw_b64 = arguments.get("content_base64")
+    if raw_b64 is not None:
+        try:
+            payload = base64.b64decode(str(raw_b64), validate=True)
+        except (ValueError, base64.binascii.Error) as exc:
+            return ToolExecutionResult(success=False, output="", error=f"content_base64 디코드 실패: {exc}")
+    elif isinstance(raw_content, (str, bytes)):
+        payload = raw_content.encode("utf-8") if isinstance(raw_content, str) else raw_content
+    else:
+        return ToolExecutionResult(success=False, output="", error="content 또는 content_base64 인자가 필요합니다.")
+
+    if len(payload) > max_bytes:
+        return ToolExecutionResult(
+            success=False,
+            output={"max_bytes": max_bytes, "actual_bytes": len(payload)},
+            error=f"artifact 크기가 한도를 초과했습니다: {len(payload)} > {max_bytes}",
+        )
+
+    existing = list(artifacts_dir.glob("*.bin"))
+    if len(existing) >= max_count:
+        return ToolExecutionResult(
+            success=False,
+            output={"max_count": max_count, "current_count": len(existing)},
+            error=f"artifact 개수 한도를 초과했습니다: {len(existing)} >= {max_count}",
+        )
+
+    sha = hashlib.sha256(payload).hexdigest()
+    bin_path = artifacts_dir / f"{sha}.bin"
+    meta_path = artifacts_dir / f"{sha}.json"
+    bin_path.write_bytes(payload)
+    metadata = {
+        "name": name,
+        "mime_type": mime_type,
+        "sha256": sha,
+        "bytes": len(payload),
+        "created_at": _utc_now_iso(),
+    }
+    meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return ToolExecutionResult(
+        success=True,
+        output={
+            "artifact_id": sha,
+            "sha256": sha,
+            "bytes_written": len(payload),
+            "path": str(bin_path),
+            "name": name,
+        },
+    )
+
+
+def _artifact_get(arguments: dict[str, object], *, artifacts_dir: Path) -> ToolExecutionResult:
+    import base64
+
+    artifact_id = str(arguments.get("artifact_id") or "")
+    if not re.fullmatch(r"[a-f0-9]{64}", artifact_id):
+        return ToolExecutionResult(success=False, output="", error="artifact_id는 64자 hex여야 합니다.")
+    bin_path = artifacts_dir / f"{artifact_id}.bin"
+    meta_path = artifacts_dir / f"{artifact_id}.json"
+    if not bin_path.exists() or not meta_path.exists():
+        return ToolExecutionResult(success=False, output="", error=f"artifact를 찾을 수 없습니다: {artifact_id}")
+    metadata = _read_json_object(meta_path)
+    payload = bin_path.read_bytes()
+    return ToolExecutionResult(
+        success=True,
+        output={
+            "artifact_id": artifact_id,
+            "name": metadata.get("name", ""),
+            "mime_type": metadata.get("mime_type", "application/octet-stream"),
+            "bytes": len(payload),
+            "content_base64": base64.b64encode(payload).decode("ascii"),
+        },
+    )
+
+
+def _artifact_list(*, artifacts_dir: Path, prefix: str) -> ToolExecutionResult:
+    entries: list[dict[str, object]] = []
+    for meta_path in sorted(artifacts_dir.glob("*.json")):
+        metadata = _read_json_object(meta_path)
+        if prefix and not str(metadata.get("name", "")).startswith(prefix):
+            continue
+        entries.append(
+            {
+                "artifact_id": meta_path.stem,
+                "name": metadata.get("name", ""),
+                "mime_type": metadata.get("mime_type", ""),
+                "bytes": metadata.get("bytes", 0),
+                "created_at": metadata.get("created_at", ""),
+            }
+        )
+    return ToolExecutionResult(success=True, output={"entries": entries, "count": len(entries)})
+
+
+def _artifact_delete(arguments: dict[str, object], *, artifacts_dir: Path) -> ToolExecutionResult:
+    artifact_id = str(arguments.get("artifact_id") or "")
+    if not re.fullmatch(r"[a-f0-9]{64}", artifact_id):
+        return ToolExecutionResult(success=False, output="", error="artifact_id는 64자 hex여야 합니다.")
+    bin_path = artifacts_dir / f"{artifact_id}.bin"
+    meta_path = artifacts_dir / f"{artifact_id}.json"
+    deleted = False
+    if bin_path.exists():
+        bin_path.unlink()
+        deleted = True
+    if meta_path.exists():
+        meta_path.unlink()
+        deleted = True
+    if not deleted:
+        return ToolExecutionResult(success=False, output="", error=f"삭제할 artifact를 찾을 수 없습니다: {artifact_id}")
+    return ToolExecutionResult(success=True, output={"artifact_id": artifact_id, "deleted": True})
+
+
+def _utc_now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def web_fetch(
+    arguments: dict[str, object],
+    *,
+    allowed_domains: list[str] | None = None,
+    max_bytes: int = 1024 * 1024,
+    timeout_seconds: float = 10.0,
+) -> ToolExecutionResult:
+    """Fetch a URL with a strict domain whitelist (default deny).
+
+    Decision (issue #19): use ``urllib.request`` from stdlib instead of
+    httpx so this builtin works without adding a dependency. Behavior is
+    equivalent for the supported scope (GET/POST, JSON/text body, custom
+    headers, redirect handling, byte cap).
+
+    Block reason ``domain_not_allowlisted`` is surfaced in the verdict for
+    machine-readable rejection (matches the policy enum spirit of #21).
+    """
+
+    import time as _time
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    url = str(arguments.get("url") or "")
+    if not url:
+        return ToolExecutionResult(success=False, output="", error="url 인자가 필요합니다.")
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return ToolExecutionResult(success=False, output="", error=f"지원하지 않는 scheme: {parsed.scheme}")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return ToolExecutionResult(success=False, output="", error="URL에서 host를 추출할 수 없습니다.")
+
+    allowed = [d.strip().lower() for d in (allowed_domains or []) if d.strip()]
+    if not _domain_in_allowlist(host, allowed):
+        return ToolExecutionResult(
+            success=False,
+            output={
+                "verdict": {
+                    "policy_blocked": True,
+                    "block_reason": "domain_not_allowlisted",
+                    "host": host,
+                    "allowed": allowed,
+                }
+            },
+            error=f"도메인이 화이트리스트에 없습니다: {host}",
+        )
+
+    method = str(arguments.get("method") or "GET").upper()
+    headers_raw = arguments.get("headers") or {}
+    headers = {str(k): str(v) for k, v in headers_raw.items()} if isinstance(headers_raw, dict) else {}
+    body_raw = arguments.get("body")
+    body_bytes: bytes | None = None
+    if body_raw is not None:
+        body_bytes = body_raw.encode("utf-8") if isinstance(body_raw, str) else json.dumps(body_raw).encode("utf-8")
+
+    request = urllib.request.Request(url, data=body_bytes, method=method, headers=headers)
+    started = _time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            payload = response.read(max_bytes + 1)
+            truncated = len(payload) > max_bytes
+            payload = payload[:max_bytes]
+            elapsed_ms = int((_time.monotonic() - started) * 1000)
+            response_headers = {k: v for k, v in response.headers.items()}
+            try:
+                body_text = payload.decode("utf-8")
+                body_truncated_text = truncated
+            except UnicodeDecodeError:
+                import base64
+
+                body_text = base64.b64encode(payload).decode("ascii")
+                body_truncated_text = truncated
+            return ToolExecutionResult(
+                success=True,
+                output={
+                    "status_code": response.status,
+                    "headers": response_headers,
+                    "body_text": body_text,
+                    "body_truncated": body_truncated_text,
+                    "bytes_read": len(payload),
+                    "elapsed_ms": elapsed_ms,
+                    "host": host,
+                },
+            )
+    except urllib.error.HTTPError as exc:
+        elapsed_ms = int((_time.monotonic() - started) * 1000)
+        return ToolExecutionResult(
+            success=False,
+            output={
+                "status_code": exc.code,
+                "host": host,
+                "elapsed_ms": elapsed_ms,
+            },
+            error=f"HTTP 오류: {exc.code} {exc.reason}",
+        )
+    except urllib.error.URLError as exc:
+        return ToolExecutionResult(success=False, output={"host": host}, error=f"네트워크 오류: {exc.reason}")
+    except (TimeoutError, OSError) as exc:
+        return ToolExecutionResult(success=False, output={"host": host}, error=f"네트워크 호출 실패: {exc}")
+
+
+def _domain_in_allowlist(host: str, allowed: list[str]) -> bool:
+    """Return True if host matches any allowed entry (exact or subdomain)."""
+
+    if not allowed:
+        return False
+    for entry in allowed:
+        if not entry:
+            continue
+        if host == entry or host.endswith("." + entry):
+            return True
+    return False
 
 
 def _result_from_process(process_output: dict[str, object], arguments: dict[str, object]) -> ToolExecutionResult:
