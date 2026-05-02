@@ -29,6 +29,7 @@ class AgentConfig:
     language: str = "ko"
     workspace_dir: Path = Path.cwd()
     tool_library_dir: Path = Path.cwd() / ".adaptive_agent" / "tools"
+    session_dir: Path = Path.cwd() / ".adaptive_agent" / "sessions"
     max_self_corrections: int = 2
     max_router_steps: int = 8
     ollama_timeout_seconds: float = 60.0
@@ -56,6 +57,12 @@ class AgentConfig:
                 workspace_dir / ".adaptive_agent" / "tools",
             )
         ).resolve()
+        session_dir = Path(
+            os.getenv(
+                "ADAPTIVE_AGENT_SESSION_DIR",
+                workspace_dir / ".adaptive_agent" / "sessions",
+            )
+        ).resolve()
 
         return cls(
             llm_provider=llm_provider
@@ -69,6 +76,7 @@ class AgentConfig:
             language=language or os.getenv("ADAPTIVE_AGENT_LANGUAGE", "ko"),
             workspace_dir=workspace_dir,
             tool_library_dir=tool_library_dir,
+            session_dir=session_dir,
             max_self_corrections=int(os.getenv("ADAPTIVE_AGENT_MAX_SELF_CORRECTIONS", "2")),
             max_router_steps=int(os.getenv("ADAPTIVE_AGENT_MAX_ROUTER_STEPS", "8")),
             ollama_timeout_seconds=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60")),

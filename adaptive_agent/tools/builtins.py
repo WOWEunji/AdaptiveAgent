@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import difflib
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -38,7 +39,7 @@ def code_execute(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) 
     try:
         output = sandbox.run_python_code(code, timeout_seconds=timeout_seconds)
     except SandboxPolicyViolation as exc:
-        return _policy_violation_result(str(exc))
+        return _policy_violation_result(exc)
     return _result_from_process(output, arguments)
 
 
@@ -61,7 +62,7 @@ def shell_run(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> 
     try:
         output = sandbox.run_shell(code, shell_binary=shell_binary, timeout_seconds=timeout_seconds)
     except SandboxPolicyViolation as exc:
-        return _policy_violation_result(str(exc))
+        return _policy_violation_result(exc)
     return _result_from_process(output, arguments)
 
 
@@ -257,7 +258,7 @@ def test_run(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> T
     try:
         output = sandbox.run_workspace_command(command, timeout_seconds=timeout_seconds)
     except SandboxPolicyViolation as exc:
-        return _policy_violation_result(str(exc))
+        return _policy_violation_result(exc)
     return _result_from_process(output, arguments)
 
 
@@ -291,6 +292,7 @@ def tool_create(arguments: dict[str, object], *, tool_library: Path) -> ToolExec
         "description": description,
         "path": str(code_path),
         "file_path": str(code_path),
+        "file_hash": _sha256_text(code),
         "status": "created_unloaded",
         "validation_status": "created_unloaded",
     }
@@ -337,14 +339,64 @@ def tool_validate(
             timeout_seconds=_coerce_timeout(arguments.get("timeout_seconds")),
         )
     except SandboxPolicyViolation as exc:
-        return _policy_violation_result(str(exc))
+        return _policy_violation_result(exc)
     result = _result_from_process(process_output, arguments)
     if result.success:
         metadata_path = tool_library / f"{name}.json"
         metadata = _read_json_object(metadata_path)
-        metadata.update({"status": "validated", "validated": True, "validation_status": "passed"})
+        metadata.update(
+            {
+                "status": "validated",
+                "validated": True,
+                "validation_status": "passed",
+                "file_hash": _sha256_text(code),
+            }
+        )
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         result.output["tool"] = metadata
+    return result
+
+
+def generated_tool_execute(
+    arguments: dict[str, object],
+    *,
+    name: str,
+    code_path: Path,
+    sandbox: LocalSandboxBackend,
+) -> ToolExecutionResult:
+    """Execute an approved generated tool in a subprocess sandbox."""
+
+    if not code_path.exists():
+        return ToolExecutionResult(success=False, output="", error=f"생성 툴 파일을 찾을 수 없습니다: {name}")
+    code = code_path.read_text(encoding="utf-8")
+    try:
+        ast.parse(code)
+    except SyntaxError as exc:
+        return ToolExecutionResult(success=False, output="", error=f"Python 문법 오류: {exc}")
+
+    runner = (
+        "import json\n"
+        f"generated_code = {code!r}\n"
+        "namespace = {}\n"
+        "exec(compile(generated_code, '<generated_tool>', 'exec'), namespace)\n"
+        "if 'run' not in namespace:\n"
+        "    raise AttributeError('generated tool must define run(arguments)')\n"
+        f"result = namespace['run']({arguments!r})\n"
+        "print(json.dumps(result, ensure_ascii=False, sort_keys=True))\n"
+    )
+    try:
+        process_output = sandbox.run_python_code(
+            runner,
+            timeout_seconds=_coerce_timeout(arguments.get("timeout_seconds")),
+        )
+    except SandboxPolicyViolation as exc:
+        return _policy_violation_result(exc)
+    result = _result_from_process(process_output, arguments)
+    if result.success:
+        try:
+            result.output["result"] = json.loads(str(result.output["execution"]["stdout"] or "null"))
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
     return result
 
 
@@ -363,6 +415,12 @@ def tool_approve(arguments: dict[str, object], *, tool_library: Path) -> ToolExe
     metadata = _read_json_object(metadata_path)
     if metadata.get("validation_status") != "passed":
         return ToolExecutionResult(success=False, output=metadata, error="검증을 통과한 툴만 승인 등록할 수 있습니다.")
+    expected_hash = str(metadata.get("file_hash") or "")
+    if not expected_hash:
+        return ToolExecutionResult(success=False, output=metadata, error="검증된 파일 hash가 없어 승인할 수 없습니다.")
+    current_hash = _sha256_text(code_path.read_text(encoding="utf-8"))
+    if current_hash != expected_hash:
+        return ToolExecutionResult(success=False, output=metadata, error="검증 이후 생성 툴 파일이 변경되어 승인할 수 없습니다.")
 
     metadata.update({"status": "approved", "approved": True, "approval_status": "approved"})
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -379,8 +437,9 @@ def tool_search(
     """Search registered and approved generated-tool metadata."""
 
     query = str(arguments.get("query") or "").casefold()
-    generated_tools = _load_generated_tool_metadata(tool_library)
-    candidates = registered_tools + generated_tools
+    top_k = _coerce_int(arguments.get("top_k"), default=10, minimum=1, maximum=50)
+    generated_tools = SkillCatalog(tool_library).search(query, top_k=top_k)
+    candidates = _dedupe_tool_candidates(registered_tools + generated_tools)
     if query:
         candidates = [
             tool
@@ -388,8 +447,9 @@ def tool_search(
             if query in str(tool.get("name", "")).casefold()
             or query in str(tool.get("description", "")).casefold()
             or query in str(tool.get("category", "")).casefold()
+            or float(tool.get("score", 0) or 0) > 0
         ]
-    return ToolExecutionResult(success=True, output={"query": query, "matches": candidates})
+    return ToolExecutionResult(success=True, output={"query": query, "top_k": top_k, "matches": candidates[:top_k]})
 
 
 def memory_read(arguments: dict[str, object], *, memory_dir: Path) -> ToolExecutionResult:
@@ -447,7 +507,13 @@ def _result_from_process(process_output: dict[str, object], arguments: dict[str,
     return ToolExecutionResult(success=success, output=output, error=error)
 
 
-def _policy_violation_result(message: str) -> ToolExecutionResult:
+_KNOWN_BLOCK_REASONS = frozenset(
+    {"workspace_path", "sensitive_absolute_path", "dangerous_shell_pattern"}
+)
+
+
+def _policy_violation_result(violation: SandboxPolicyViolation) -> ToolExecutionResult:
+    reason = getattr(violation, "reason", None) or "unspecified"
     return ToolExecutionResult(
         success=False,
         output={
@@ -455,9 +521,10 @@ def _policy_violation_result(message: str) -> ToolExecutionResult:
             "verdict": {
                 "matches_expectation": False,
                 "policy_blocked": True,
+                "block_reason": reason,
             },
         },
-        error=message,
+        error=str(violation),
     )
 
 
@@ -567,6 +634,21 @@ def _load_generated_tool_metadata(tool_library: Path) -> list[dict[str, Any]]:
     return SkillCatalog(tool_library).list()
 
 
+def _dedupe_tool_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[str, dict[str, Any]] = {}
+    for tool in candidates:
+        name = str(tool.get("name") or "")
+        if not name:
+            continue
+        existing = deduped.get(name)
+        if existing is None:
+            deduped[name] = tool
+            continue
+        if str(existing.get("source") or "builtin") != "builtin" and str(tool.get("source") or "") == "builtin":
+            deduped[name] = tool
+    return sorted(deduped.values(), key=lambda item: (-float(item.get("score", 1) or 1), str(item.get("name", ""))))
+
+
 def _read_json_object(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -575,6 +657,10 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _resolve_memory_path(memory_dir: Path, key: str) -> Path | ToolExecutionResult:

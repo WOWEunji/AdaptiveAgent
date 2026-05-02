@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
+from adaptive_agent.skills import SkillCatalog
 from adaptive_agent.tools import builtins
 from adaptive_agent.tools.models import Tool, ToolExecutionResult
 from adaptive_agent.tools.sandbox import LocalSandboxBackend
@@ -14,6 +16,7 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self.generated_load_results: list[dict[str, object]] = []
 
     def register(self, tool: Tool) -> None:
         if tool.name in self._tools:
@@ -34,10 +37,11 @@ def create_default_registry(
     """Create the default builtin tool registry."""
 
     registry = ToolRegistry()
-    workspace = (workspace_dir or Path.cwd()).resolve()
+    raw_workspace = workspace_dir or Path.cwd()
+    workspace = raw_workspace.resolve()
     tool_library = (tool_library_dir or workspace / ".adaptive_agent" / "tools").resolve()
     memory_dir = workspace / ".adaptive_agent" / "memory"
-    sandbox = LocalSandboxBackend(workspace)
+    sandbox = LocalSandboxBackend(raw_workspace)
 
     def echo(arguments: dict[str, object]) -> ToolExecutionResult:
         return ToolExecutionResult(success=True, output=arguments.get("task", ""))
@@ -55,10 +59,14 @@ def create_default_registry(
                 "category": tool.category,
                 "safety_level": tool.safety_level,
                 "usage": tool.usage,
+                "source": tool.source,
             }
             for tool in registry.list()
         ]
-        return ToolExecutionResult(success=True, output=tools)
+        output: object = tools
+        if registry.generated_load_results:
+            output = {"tools": tools, "generated_load_results": registry.generated_load_results}
+        return ToolExecutionResult(success=True, output=output)
 
     def list_files(arguments: dict[str, object]) -> ToolExecutionResult:
         raw_path = str(arguments.get("path") or ".")
@@ -226,6 +234,7 @@ def create_default_registry(
                         "category": tool.category,
                         "safety_level": tool.safety_level,
                         "usage": tool.usage,
+                        "source": tool.source,
                     }
                     for tool in registry.list()
                 ],
@@ -290,7 +299,77 @@ def create_default_registry(
             usage="python3 -m adaptive_agent --tool suggest_builtin_tools",
         )
     )
+    registry.generated_load_results = load_generated_tools(registry, tool_library=tool_library, sandbox=sandbox)
     return registry
+
+
+def load_generated_tools(
+    registry: ToolRegistry,
+    *,
+    tool_library: Path,
+    sandbox: LocalSandboxBackend,
+) -> list[dict[str, object]]:
+    """Load approved generated tools from the manifest into the registry."""
+
+    load_results: list[dict[str, object]] = []
+    catalog = SkillCatalog(tool_library)
+    tool_library = tool_library.resolve()
+    for metadata in catalog.list():
+        name = str(metadata.get("name") or "")
+        if not name:
+            continue
+        if registry.get(name) is not None:
+            load_results.append({"name": name, "loaded": False, "reason": "duplicate_tool_name"})
+            continue
+        if metadata.get("validation_status") != "passed" or metadata.get("approval_status") != "approved":
+            load_results.append({"name": name, "loaded": False, "reason": "not_approved_or_validated"})
+            continue
+        code_path = _resolve_generated_tool_path(tool_library, metadata)
+        if code_path is None or not code_path.exists():
+            load_results.append({"name": name, "loaded": False, "reason": "missing_generated_tool_file"})
+            continue
+        expected_hash = str(metadata.get("file_hash") or "")
+        if not expected_hash:
+            load_results.append({"name": name, "loaded": False, "reason": "missing_generated_tool_file_hash"})
+            continue
+        actual_hash = hashlib.sha256(code_path.read_bytes()).hexdigest()
+        if actual_hash != expected_hash:
+            load_results.append({"name": name, "loaded": False, "reason": "generated_tool_file_hash_mismatch"})
+            continue
+        registry.register(
+            Tool(
+                name=name,
+                description=str(metadata.get("description") or "승인된 생성 도구입니다."),
+                handler=lambda arguments, tool_name=name, path=code_path: builtins.generated_tool_execute(
+                    arguments,
+                    name=tool_name,
+                    code_path=path,
+                    sandbox=sandbox,
+                ),
+                category=str(metadata.get("category") or "generated"),
+                safety_level=str(metadata.get("safety_level") or "high"),
+                usage=f"python3 -m adaptive_agent --json --tool {name}",
+                source="generated",
+                parameters=metadata.get("parameters") if isinstance(metadata.get("parameters"), dict) else {},
+                returns=metadata.get("returns") if isinstance(metadata.get("returns"), dict) else {},
+                validation_status="passed",
+            )
+        )
+        load_results.append({"name": name, "loaded": True, "reason": "loaded"})
+    return load_results
+
+
+def _resolve_generated_tool_path(tool_library: Path, metadata: dict[str, object]) -> Path | None:
+    raw_path = str(metadata.get("file_path") or metadata.get("path") or "")
+    if not raw_path:
+        return None
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = tool_library / raw_path
+    resolved = candidate.resolve()
+    if resolved != tool_library and tool_library not in resolved.parents:
+        return None
+    return resolved
 
 
 def _requirements_breakdown() -> dict[str, object]:

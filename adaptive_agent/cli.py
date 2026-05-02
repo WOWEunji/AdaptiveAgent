@@ -50,6 +50,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="명시 툴 실행 인자. key=value 형식이며 여러 번 사용할 수 있습니다.",
     )
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help="pending HITL 세션 ID를 명시적으로 재개",
+    )
+    parser.add_argument(
+        "--approve",
+        action="store_true",
+        help="재개한 pending 세션의 요청을 승인",
+    )
+    parser.add_argument(
+        "--reject",
+        action="store_true",
+        help="재개한 pending 세션의 요청을 거부",
+    )
+    parser.add_argument(
+        "--input",
+        default=None,
+        help="재개한 pending 세션에 전달할 추가 입력",
+    )
     return parser
 
 
@@ -63,12 +83,33 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     agent = AdaptiveAgent(config=config)
 
+    if args.resume:
+        try:
+            result = agent.resume(args.resume, user_input=args.input, approve=args.approve, reject=args.reject)
+        except ValueError as exc:
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "success": False,
+                            "error": str(exc),
+                            "action": "resume_error",
+                            "session_id": args.resume,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"세션 재개 실패 (session_id={args.resume}): {exc}")
+            return 1
+        _print_result(result, args.json)
+        return 0
+
     if args.list_tools:
         tools = agent.list_tools()
         if args.json:
-            print(
-                json.dumps(
-                    [
+            payload: object = [
                         {
                             "name": tool.name,
                             "description": tool.description,
@@ -76,16 +117,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "requires_llm": tool.requires_llm,
                             "safety_level": tool.safety_level,
                             "usage": tool.usage,
+                            "source": tool.source,
                         }
                         for tool in tools
-                    ],
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
+                    ]
+            load_results = getattr(agent.registry, "generated_load_results", [])
+            if load_results:
+                payload = {"tools": payload, "generated_load_results": load_results}
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             for tool in tools:
-                print(f"- {tool.name} [{tool.category}]: {tool.description}")
+                print(f"- {tool.name} [{tool.category}/{tool.source}]: {tool.description}")
         return 0
 
     if args.tool:
@@ -125,22 +167,40 @@ def _print_result(result, as_json: bool, tool_name: str | None = None) -> None:
             print(pformat(result.output, width=100, sort_dicts=False))
         else:
             print(result.output)
+        if hasattr(result, "action"):
+            print(f"\n상태: {result.action}")
+        if getattr(result, "tool_name", None):
+            print(f"툴: {result.tool_name}")
+        pending = getattr(result, "pending", None)
+        if isinstance(pending, dict) and pending.get("status") == "pending":
+            session_id = pending.get("session_id")
+            print(f"세션: {session_id}")
+            print(f"재개 예: python3 -m adaptive_agent --resume {session_id} --input \"...\"")
+            print(f"거부 예: python3 -m adaptive_agent --resume {session_id} --reject")
+            print("세션 파일이 누적되면 .adaptive_agent/sessions/ 아래 파일을 수동 삭제할 수 있습니다.")
 
 
 def _result_to_dict(result, tool_name: str | None = None) -> dict[str, object]:
     if hasattr(result, "task"):
+        events = getattr(result, "events", [])
+        if not isinstance(events, list):
+            events = []
+        session_id = getattr(result, "session_id", None)
+        pending = getattr(result, "pending", None)
         return {
             "task": result.task,
             "output": result.output,
             "tool_name": result.tool_name,
             "action": result.action,
+            "session_id": session_id if isinstance(session_id, str) else None,
+            "pending": pending if isinstance(pending, dict) else None,
             "events": [
                 {
                     "name": event.name,
                     "details": event.details,
                     "created_at": event.created_at,
                 }
-                for event in getattr(result, "events", [])
+                for event in events
             ],
         }
 
@@ -150,6 +210,21 @@ def _result_to_dict(result, tool_name: str | None = None) -> dict[str, object]:
         "error": result.error,
         "tool_name": tool_name,
         "action": "tool" if tool_name else "tool_result",
+        "execution_summary": _execution_summary(result.output),
+    }
+
+
+def _execution_summary(output: object) -> dict[str, object] | None:
+    if not isinstance(output, dict):
+        return None
+    execution = output.get("execution")
+    if not isinstance(execution, dict):
+        return None
+    return {
+        "exit_code": execution.get("exit_code"),
+        "stdout": execution.get("stdout"),
+        "stderr": execution.get("stderr"),
+        "timed_out": execution.get("timed_out"),
     }
 
 

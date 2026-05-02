@@ -37,6 +37,21 @@ class CliTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn('"name": "list_files"', buffer.getvalue())
 
+    def test_resume_error_is_user_friendly(self) -> None:
+        buffer = io.StringIO()
+        session_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        underlying_message = "pending 상태의 세션만 재개할 수 있습니다"
+        with patch("adaptive_agent.cli.AdaptiveAgent") as agent_class, redirect_stdout(buffer):
+            agent_class.return_value.resume.side_effect = ValueError(underlying_message)
+
+            exit_code = main(["--resume", session_id, "--input", "ok"])
+
+        # 사용자에게 노출되는 라벨 문구는 자유 영역 — 구조적 계약만 검증
+        self.assertEqual(exit_code, 1)
+        output = buffer.getvalue()
+        self.assertIn(session_id, output, "어떤 세션이 실패했는지 식별 가능해야 합니다")
+        self.assertIn(underlying_message, output, "원인 메시지가 사용자에게 전달되어야 합니다")
+
     def test_natural_language_task_keeps_original_spacing(self) -> None:
         buffer = io.StringIO()
         with patch("adaptive_agent.cli.AdaptiveAgent") as agent_class, redirect_stdout(buffer):
