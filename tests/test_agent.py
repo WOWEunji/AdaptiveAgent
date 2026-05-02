@@ -187,6 +187,60 @@ class AdaptiveAgentTest(unittest.TestCase):
 
         self.assertEqual([agent.role for agent in agents], ["librarian", "planner", "coder", "executor", "critic"])
 
+    def test_coder_agent_routes_to_error_when_required_fields_missing(self) -> None:
+        from adaptive_agent.state import AgentState as _State
+
+        cases = [
+            ("name 누락", {"description": "d", "code": "def run(a): pass\n"}, ["name"]),
+            ("description 누락", {"name": "t", "code": "def run(a): pass\n"}, ["description"]),
+            ("code 누락", {"name": "t", "description": "d"}, ["code"]),
+            ("빈 문자열은 누락 취급", {"name": "  ", "description": "d", "code": "def run(a): pass\n"}, ["name"]),
+            (
+                "비-문자열 code는 누락 취급",
+                {"name": "t", "description": "d", "code": {"raw": "stuff"}},
+                ["code"],
+            ),
+        ]
+        for label, plan_arguments, expected_missing in cases:
+            with self.subTest(case=label):
+                state = _State()
+                state.user_task = "create tool"
+                state.current_plan = {
+                    "action": "tool",
+                    "tool_name": "tool_create",
+                    "arguments": plan_arguments,
+                }
+                # coder LLM이 아무 보강도 못 했다고 가정
+                agent = CoderAgent(coder=lambda _s: {})
+
+                result = agent.run(state)
+
+                self.assertEqual(result.next_node, "error")
+                self.assertEqual(result.status, "invalid_arguments")
+                self.assertEqual(result.details["missing_fields"], expected_missing)
+                invalid_events = [e for e in state.events if e.name == "coder_arguments_invalid"]
+                self.assertTrue(invalid_events, "coder_arguments_invalid 이벤트가 있어야 합니다")
+                self.assertEqual(invalid_events[0].details["missing_fields"], expected_missing)
+
+    def test_coder_agent_proceeds_to_execute_when_llm_supplies_missing_fields(self) -> None:
+        from adaptive_agent.state import AgentState as _State
+
+        state = _State()
+        state.user_task = "create tool"
+        state.current_plan = {
+            "action": "tool",
+            "tool_name": "tool_create",
+            "arguments": {"name": "hello_tool", "description": "Greets"},
+        }
+        agent = CoderAgent(coder=lambda _s: {"code": "def run(arguments):\n    return {}\n"})
+
+        result = agent.run(state)
+
+        self.assertEqual(result.next_node, "execute")
+        self.assertEqual(state.current_plan["arguments"]["name"], "hello_tool")
+        self.assertIn("def run", state.current_plan["arguments"]["code"])
+        self.assertIn("tool_code_created", [e.name for e in state.events])
+
     def test_unsupported_clarification_action_is_normalized_to_ask_human(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
