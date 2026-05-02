@@ -601,6 +601,54 @@ class AdaptiveAgentTest(unittest.TestCase):
         self.assertIn("code_execute", tool_names)
         self.assertIn("ask_human", tool_names)
 
+    def test_user_task_input_variations_are_preserved(self) -> None:
+        cases = [
+            ("한국어", "데이터를 정리해줘"),
+            ("이모지", "🎉 ship it 🚀"),
+            ("긴 입력", "x" * 8_000),
+            ("앞뒤 공백 보존", "  앞 뒤  공백  "),
+            ("탭과 줄바꿈", "first\tline\nsecond line"),
+            ("JSON처럼 보이는 평문", '{"action":"실제로는 평문"}'),
+            ("따옴표 혼합", "\"양쪽\" '단일' 따옴표"),
+            ("이스케이프 시퀀스 평문", "raw \\n not a newline"),
+        ]
+        for label, task in cases:
+            with self.subTest(case=label):
+                llm = StubLLM()
+                agent = AdaptiveAgent(config=AgentConfig(), llm_client=llm)
+
+                result = agent.run(task)
+
+                self.assertEqual(result.task, task, "원문 task가 응답에 그대로 보존되어야 합니다")
+                self.assertGreaterEqual(len(llm.prompts), 1)
+                self.assertIn(task, llm.prompts[0], "원문 task가 plan 프롬프트에 포함되어야 합니다")
+
+    def test_invalid_plan_json_variations_fall_back_safely(self) -> None:
+        cases = [
+            ("완전 비-JSON", "그냥 자유 텍스트 응답"),
+            ("미완성 JSON", '{"action":"tool",'),
+            ("내부 깨진 JSON", '{"action":"tool", "tool_name": "echo", arguments: {}}'),
+            ("빈 문자열", ""),
+            ("JSON null", "null"),
+            ("JSON 배열", "[1, 2, 3]"),
+            ("숫자만", "42"),
+        ]
+        for label, llm_response in cases:
+            with self.subTest(case=label):
+                agent = AdaptiveAgent(
+                    config=AgentConfig(max_self_corrections=0),
+                    llm_client=StubLLM(llm_response),
+                )
+
+                result = agent.run("계획 요청")
+
+                # 깨진 JSON은 router_error/exception이 아닌, 정상적인 fallback action으로 회수되어야 함
+                self.assertIn(
+                    result.action,
+                    {"llm", "tool", "input_required", "tool_error"},
+                    f"잘못된 응답 '{label}'이 안전한 action으로 폴백되어야 합니다",
+                )
+
     def test_agent_state_blueprint_fields_have_defaults(self) -> None:
         agent = AdaptiveAgent(config=AgentConfig(), llm_client=StubLLM())
 
