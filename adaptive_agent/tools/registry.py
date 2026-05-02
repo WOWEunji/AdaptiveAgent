@@ -7,6 +7,8 @@ from pathlib import Path
 
 from adaptive_agent.skills import SkillCatalog
 from adaptive_agent.tools import builtins
+from adaptive_agent.tools.models import Tool, ToolExecutionResult
+from adaptive_agent.tools.sandbox import DockerSandboxBackend, LocalSandboxBackend
 from adaptive_agent.tools.models import (
     SKILL_CLASS_ATOMIC,
     SKILL_CLASS_FUNCTIONAL,
@@ -40,6 +42,17 @@ def create_default_registry(
     workspace_dir: Path | None = None,
     tool_library_dir: Path | None = None,
     *,
+    sandbox_backend: str = "local",
+    sandbox_image: str = "python:3.11-slim",
+    sandbox_memory_limit: str = "256m",
+    sandbox_cpu_limit: str = "1",
+    sandbox_pids_limit: int = 128,
+) -> ToolRegistry:
+    """Create the default builtin tool registry.
+
+    ``sandbox_backend`` 'local' (default, zero dep) 또는 'docker' (강한 격리).
+    Docker 백엔드는 시작 시 ``docker version`` 호출로 가용성 확인 — 미설치
+    환경에선 명시적 RuntimeError로 사용자 안내.
     embedder: object | None = None,
     embedding_threshold: float = 0.4,
     artifact_max_bytes: int = 10 * 1024 * 1024,
@@ -59,6 +72,28 @@ def create_default_registry(
     workspace = raw_workspace.resolve()
     tool_library = (tool_library_dir or workspace / ".adaptive_agent" / "tools").resolve()
     memory_dir = workspace / ".adaptive_agent" / "memory"
+
+    backend_choice = sandbox_backend.lower().strip()
+    if backend_choice == "docker":
+        if not DockerSandboxBackend.is_available():
+            raise RuntimeError(
+                "AgentConfig.sandbox_backend='docker'로 설정되었지만 docker CLI가 "
+                "사용 불가합니다. Docker daemon을 실행하거나 sandbox_backend='local'로 "
+                "변경하세요."
+            )
+        sandbox = DockerSandboxBackend(
+            raw_workspace,
+            image=sandbox_image,
+            memory_limit=sandbox_memory_limit,
+            cpu_limit=sandbox_cpu_limit,
+            pids_limit=sandbox_pids_limit,
+        )
+    elif backend_choice == "local":
+        sandbox = LocalSandboxBackend(raw_workspace)
+    else:
+        raise ValueError(
+            f"알 수 없는 sandbox_backend: {sandbox_backend!r} (local/docker)"
+        )
     sandbox = LocalSandboxBackend(raw_workspace)
     web_fetch_allowed = list(web_fetch_allowed_domains)
 
