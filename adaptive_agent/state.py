@@ -70,6 +70,7 @@ class AgentState:
     session_status: str = "running"
     failure_count: int = 0
     summary: str = ""
+    llm_usage_records: list[dict[str, Any]] = field(default_factory=list)
 
     def record_event(self, name: str, **details: Any) -> None:
         """Append an ordered execution event."""
