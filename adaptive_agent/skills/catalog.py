@@ -64,7 +64,22 @@ class SkillCatalog:
     def upsert(self, metadata: dict[str, Any]) -> dict[str, Any]:
         """Insert or replace approved tool metadata by name."""
 
+        result = self.upsert_with_diff(metadata)
+        return result["entry"]
+
+    def upsert_with_diff(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        """Upsert and return ``{entry, merged, previous_usage_count,
+        previous_failure_count}``.
+
+        ``merged`` is ``True`` iff an entry with the same ``name`` already
+        existed and was overwritten. Counter values are reported pre-merge so
+        callers can emit a structured ``manifest_entry_merged`` event without
+        needing to read the manifest twice.
+        """
+
         normalized = self._normalize(metadata)
+        existing = self._find_existing(normalized["name"])
+        merged = bool(existing)
         payload = self._load()
         tools = [tool for tool in payload.get("tools", []) if tool.get("name") != normalized["name"]]
         tools.append(normalized)
@@ -72,7 +87,12 @@ class SkillCatalog:
         payload["tools"] = sorted(tools, key=lambda item: str(item.get("name", "")))
         self.tool_library.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        return normalized
+        return {
+            "entry": normalized,
+            "merged": merged,
+            "previous_usage_count": int(existing.get("usage_count", 0)) if existing else 0,
+            "previous_failure_count": int(existing.get("failure_count", 0)) if existing else 0,
+        }
 
     def record_usage(self, name: str, *, success: bool) -> dict[str, Any] | None:
         """Increment ``usage_count`` and (on failure) ``failure_count`` for ``name``.

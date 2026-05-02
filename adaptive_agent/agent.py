@@ -481,6 +481,19 @@ class AdaptiveAgent:
             success=success,
             has_error=error is not None,
         )
+        # tool_approve가 manifest_merge 정보를 흘려보내면 별도 이벤트로 노출
+        # (Phase 1 of #16: 이름 충돌 자동 병합의 가시성)
+        if tool_name == "tool_approve" and success:
+            last_result = state.last_tool_result or {}
+            output = last_result.get("output") if isinstance(last_result, dict) else None
+            merge_info = output.get("manifest_merge") if isinstance(output, dict) else None
+            if isinstance(merge_info, dict) and merge_info.get("merged"):
+                state.record_event(
+                    "manifest_entry_merged",
+                    tool_name=str(output.get("tool", {}).get("name") or ""),
+                    previous_usage_count=merge_info.get("previous_usage_count"),
+                    previous_failure_count=merge_info.get("previous_failure_count"),
+                )
 
     def _plan_with_llm(self, task: str) -> dict[str, Any]:
         """Create a normalized plan from the LLM response."""
