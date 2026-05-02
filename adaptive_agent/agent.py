@@ -80,6 +80,11 @@ class AdaptiveAgent:
         self.registry = registry or create_default_registry(
             self.config.workspace_dir,
             tool_library_dir=self.config.tool_library_dir,
+            sandbox_backend=self.config.sandbox_backend,
+            sandbox_image=self.config.sandbox_image,
+            sandbox_memory_limit=self.config.sandbox_memory_limit,
+            sandbox_cpu_limit=self.config.sandbox_cpu_limit,
+            sandbox_pids_limit=self.config.sandbox_pids_limit,
         )
         self.executor = executor or ToolExecutor(self.registry)
         self.prompt_loader = prompt_loader or PromptLoader()
