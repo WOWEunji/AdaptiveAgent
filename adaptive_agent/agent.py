@@ -189,6 +189,23 @@ class AdaptiveAgent:
         """Run one preserved user task through the state-machine router."""
         return self.router.run(task)
 
+    def stream_response(self, task: str):
+        """Yield raw LLM chunks for ``task``, bypassing planning/tool routing.
+
+        직접 자연어 응답을 stream으로 받아야 할 때 사용. Plan/JSON 흐름은
+        full string 파싱이 필요해 streaming 부적합 — 그래서 별도 entry.
+        Provider가 streaming 미지원이면 single-chunk로 회수된다.
+        """
+
+        stream_method = getattr(self.llm_client, "stream", None)
+        if stream_method is None:
+            # Stream 미지원 클라이언트 (예: 일부 stub) — complete 결과를 한 chunk로
+            yield self.llm_client.complete(task)
+            return
+        for chunk in stream_method(task):
+            if chunk:
+                yield chunk
+
     def run_tool(self, tool_name: str, arguments: dict[str, Any], *, _state: AgentState | None = None):
         """Execute an explicitly named tool without natural-language planning.
 
