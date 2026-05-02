@@ -65,9 +65,17 @@ class AdaptiveAgent:
     ) -> None:
         self.config = config or AgentConfig.from_env()
         self.llm_client = llm_client or create_llm_client(self.config)
+        from adaptive_agent.skills.embedding import create_embedder
+
+        self._embedder = create_embedder(
+            self.config.embedding_provider,
+            model_id=self.config.embedding_model or None,
+        )
         self.registry = registry or create_default_registry(
             self.config.workspace_dir,
             tool_library_dir=self.config.tool_library_dir,
+            embedder=self._embedder,
+            embedding_threshold=self.config.embedding_threshold,
             artifact_max_bytes=self.config.artifact_max_bytes,
             artifact_max_count=self.config.artifact_max_count,
             web_fetch_allowed_domains=self.config.web_fetch_allowed_domains,

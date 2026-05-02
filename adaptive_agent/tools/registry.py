@@ -40,13 +40,19 @@ def create_default_registry(
     workspace_dir: Path | None = None,
     tool_library_dir: Path | None = None,
     *,
+    embedder: object | None = None,
+    embedding_threshold: float = 0.4,
     artifact_max_bytes: int = 10 * 1024 * 1024,
     artifact_max_count: int = 1000,
     web_fetch_allowed_domains: tuple[str, ...] | list[str] = (),
     web_fetch_max_bytes: int = 1024 * 1024,
     web_fetch_timeout_seconds: float = 10.0,
 ) -> ToolRegistry:
-    """Create the default builtin tool registry."""
+    """Create the default builtin tool registry.
+
+    ``embedder``는 SkillCatalog의 의미 검색을 옵트인으로 활성화한다.
+    None이면 기존 키워드-only 동작.
+    """
 
     registry = ToolRegistry()
     raw_workspace = workspace_dir or Path.cwd()
@@ -265,6 +271,8 @@ def create_default_registry(
                     for tool in registry.list()
                 ],
                 tool_library=tool_library,
+                embedder=embedder,
+                embedding_threshold=embedding_threshold,
             ),
             category="tool_library",
             skill_class=SKILL_CLASS_PLANNING,
@@ -291,7 +299,12 @@ def create_default_registry(
         Tool(
             name="tool_approve",
             description="사용자 승인 후 검증된 생성 도구를 manifest 스킬 카탈로그에 등록합니다.",
-            handler=lambda arguments: builtins.tool_approve(arguments, tool_library=tool_library),
+            handler=lambda arguments: builtins.tool_approve(
+                # agent의 embedder를 default로, arguments에 _embedder가
+                # 명시되어 있으면 그것이 우선 (테스트/주입 친화).
+                ({"_embedder": embedder, **arguments} if embedder is not None else arguments),
+                tool_library=tool_library,
+            ),
             category="tool_library",
             skill_class=SKILL_CLASS_FUNCTIONAL,
             safety_level="high",
