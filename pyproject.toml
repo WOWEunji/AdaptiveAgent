@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adaptive-agent"
+version = "0.1.0"
+description = "CLI 기반 AdaptiveAgent — 자연어 작업을 분석해 내장/생성 도구로 실행하는 오픈 코어 에이전트."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "WowEunji", email = "ggss5927@gmail.com" }]
+keywords = ["agent", "llm", "cli", "tool-use", "skill-library"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "ollama",
+    "openai>=1.40.0",
+    "google-genai>=1.0.0",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = ["mypy"]
+
+[project.urls]
+Homepage = "https://github.com/WOWEunji/AdaptiveAgent"
+Issues = "https://github.com/WOWEunji/AdaptiveAgent/issues"
+Source = "https://github.com/WOWEunji/AdaptiveAgent"
+
+[project.scripts]
+adaptive-agent = "adaptive_agent.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["adaptive_agent*"]
+exclude = ["tests*", "scripts*", "docs*"]
+
+[tool.setuptools.package-data]
+adaptive_agent = ["prompts/**/*.txt"]
