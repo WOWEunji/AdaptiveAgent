@@ -106,11 +106,11 @@ Plan Agent는 다음 큰 action 중 하나를 반환한다.
 
 | 상태 | 항목 |
 | --- | --- |
-| 구현됨 | `AgentState`, `StateMachineRouter`(retrieve→plan→{code\|execute}→critique 전이, max_steps 가드, unknown_next_node 폴백), `agents/` 5종(Plan/Coder/Executor/Critic/Librarian), Plan/Coder/Critic/Correction prompt 파일, `SkillCatalog`(키워드/태그/카테고리 가중치 Top-K), 생성 툴 create/validate/approve/search built-in, 승인 후 manifest 등록 + hash mismatch/missing 차단을 거친 generated tool loader, HITL 재개(`agent.resume()` + `SessionStore.save_pending/load_pending/close` + CLI `--resume/--approve/--reject/--input`), Critic verdict→retry/approve/error 라우팅, 정책 차단의 `block_reason` 식별자(`workspace_path`/`sensitive_absolute_path`/`dangerous_shell_pattern`) |
-| 부분 구현 | `LibrarianAgent`(현재 `tool_search` 호출만 — manifest 정합성·usage_count/failure_count·중복 병합 미반영), Critic reflection의 Plan 재활용(전달은 되지만 prompt 활용 검증 부족), `agent.py::_run_normalized_plan`(self-correction + HITL 분기 + tool_create 후속을 한 함수가 떠안고 있어 책임 분리 필요) |
-| 아직 남음 | `_run_normalized_plan` → ExecutorAgent/SelfCorrector/ApprovalGateway 분해, CoderAgent의 `tool_create` 인자(name/description/code) 누락 검증, 세션 디렉터리 cleanup 정책(TTL/카운트 cap), embedding 기반 Top-K 검색, 컨테이너 샌드박스(현재는 LocalSandboxBackend subprocess + temp dir), `artifact_store`·`web_fetch` 실구현, multi-agent 병렬화 |
+| 구현됨 | `AgentState`, `StateMachineRouter`(retrieve→plan→{code\|execute}→critique 전이, max_steps 가드, unknown_next_node 폴백), `agents/` 5종(Plan/Coder/Executor/Critic/Librarian), Plan/Coder/Critic/Correction prompt 파일, `SkillCatalog`(키워드/태그/카테고리 가중치 Top-K, `record_usage`로 usage/failure 통계, `find_stale_entries`로 무결성 감사), 생성 툴 create/validate/approve/search built-in, 승인 후 manifest 등록 + hash mismatch/missing 차단을 거친 generated tool loader, HITL 재개(`agent.resume()` + `SessionStore.save_pending/load_pending/close` + CLI `--resume/--approve/--reject/--input`), Critic verdict→retry/approve/error 라우팅, 정책 차단의 `block_reason` 식별자(`workspace_path`/`sensitive_absolute_path`/`dangerous_shell_pattern`), CoderAgent의 `tool_create` 인자(name/description/code) 누락 검증 + `coder_arguments_invalid` 이벤트, `_run_normalized_plan` 1차 분해(`_execute_normalized_tool` + `_run_self_correction_loop` + `_ToolAttemptOutcome`), LibrarianAgent의 catalog 감사·`record_usage` 위임·`generated_tool_usage_recorded` 이벤트 |
+| 부분 구현 | Critic reflection의 Plan 재활용(전달은 되지만 prompt가 실제로 활용하는지 단위 테스트로 잠그지 않음), `agent.py` 분해(`_run_normalized_plan`은 분해됐으나 plan normalization·prompt builders·response builders는 같은 파일 ~870줄에 남아있음), Librarian 중복 매니페스트 항목 병합(이름 충돌 시 정책 미정) |
+| 아직 남음 | `_execute_normalized_tool`/`_run_self_correction_loop`을 `agents/executor.py`로 흡수해 router 다이어그램 모듈 경계와 일치시키기, 세션 디렉터리 cleanup 정책(TTL/카운트 cap), embedding 기반 Top-K 검색, 컨테이너 샌드박스(현재는 LocalSandboxBackend subprocess + temp dir), `artifact_store`·`web_fetch` 실구현, multi-agent 병렬화 |
 
-> 마지막 갱신은 `tests/test_router_transitions.py` + `tests/test_prompts_contract.py` 도입(2026-05-02) 시점이며, 표를 바꿀 때는 같은 PR에서 갱신해 두세요.
+> 마지막 갱신은 A4·A5·A3 1차 분해 + B5/B6 테스트 강화 도입(2026-05-02) 시점. 남은 항목은 GitHub Issues에서 추적합니다.
 
 ## 저장 정책
 
