@@ -80,6 +80,11 @@ class AdaptiveAgent:
         self.registry = registry or create_default_registry(
             self.config.workspace_dir,
             tool_library_dir=self.config.tool_library_dir,
+            artifact_max_bytes=self.config.artifact_max_bytes,
+            artifact_max_count=self.config.artifact_max_count,
+            web_fetch_allowed_domains=self.config.web_fetch_allowed_domains,
+            web_fetch_max_bytes=self.config.web_fetch_max_bytes,
+            web_fetch_timeout_seconds=self.config.web_fetch_timeout_seconds,
         )
         self.executor = executor or ToolExecutor(self.registry)
         self.prompt_loader = prompt_loader or PromptLoader()
