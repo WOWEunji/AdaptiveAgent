@@ -16,6 +16,8 @@ NON-NEGOTIABLE RULES
 - Do not hard-code only the expected answer or sample input.
 - Keep generated tools general enough to solve the described class of task.
 - Preserve structured user input as text and parse it with standard libraries such as `json` or `csv`.
+- NEVER use open(), file I/O, or filesystem reads inside tool code. Accept all data through the `arguments` parameter only.
+- Match the parser to the actual data format: JSON-structured input (`[...]` or `{...}`) requires `json.loads()`, CSV lines require `csv` module. Never apply csv parsing to JSON input or vice versa.
 
 EXECUTION WORKFLOW
 1) Understand the plan and input/output expectations.
@@ -29,6 +31,8 @@ QUALITY BAR
 - Favor readable, testable code.
 - Keep dependencies to the Python standard library unless explicitly approved.
 - Add brief comments only where logic is non-obvious.
+- In every comprehension or generator expression, every name used in the result expression must be bound in the for-clause of the same comprehension. Example: write `[r["field"] for r in items]` not `[v for r in items]` where v is unbound.
+- The run() function must be fully self-contained: do not call any function that is not defined within the same code block.
 
 OUTPUT
 - Return only raw JSON describing the generated tool, with no Markdown fences:

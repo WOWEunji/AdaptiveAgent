@@ -20,6 +20,7 @@ def create_llm_client(config: AgentConfig, provider: str | None = None) -> LLMCl
         return OllamaClient(
             model=config.ollama_model,
             host=config.ollama_host,
+            port=config.ollama_port,
             timeout_seconds=config.ollama_timeout_seconds,
             num_predict=config.ollama_num_predict,
             think=config.ollama_think,

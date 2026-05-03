@@ -264,6 +264,84 @@ def test_run(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> T
     return _result_from_process(output, arguments)
 
 
+def _check_code_semantics(code: str) -> str | None:
+    """Detect common semantic errors in generated tool code using AST analysis.
+
+    Currently checks: comprehension result expressions must only reference names
+    that are bound in the comprehension's own for-clause(s) or visible in outer
+    scope (imports, assignments, function parameters, builtins).
+
+    Returns an error description string on failure, None on success.
+    """
+    import builtins as _builtins_module
+
+    _BUILTIN_NAMES: frozenset[str] = frozenset(dir(_builtins_module))
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None  # syntax errors are reported separately
+
+    # Collect module-level visible names: imports, assignments, function/class defs
+    module_scope: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                module_scope.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            module_scope.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = getattr(node, "targets", None) or (
+                [node.target] if hasattr(node, "target") else []
+            )
+            for t in targets:
+                for n in ast.walk(t):
+                    if isinstance(n, ast.Name):
+                        module_scope.add(n.id)
+
+    def _bound_names_in_generators(generators: list) -> set[str]:
+        bound: set[str] = set()
+        for gen in generators:
+            for n in ast.walk(gen.target):
+                if isinstance(n, ast.Name):
+                    bound.add(n.id)
+        return bound
+
+    def _loaded_names(expr: ast.expr) -> list[str]:
+        return [
+            n.id
+            for n in ast.walk(expr)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        ]
+
+    def _check_result_expr(
+        result_expr: ast.expr, bound: set[str]
+    ) -> str | None:
+        for name in _loaded_names(result_expr):
+            if name not in bound and name not in module_scope and name not in _BUILTIN_NAMES:
+                return (
+                    f"Name '{name}' is used in a comprehension result expression but is not "
+                    f"bound by any for-clause (bound names: {sorted(bound)}). "
+                    "Every name in the result expression must be introduced in a for-clause."
+                )
+        return None
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            bound = _bound_names_in_generators(node.generators)
+            err = _check_result_expr(node.elt, bound)
+            if err:
+                return err
+        elif isinstance(node, ast.DictComp):
+            bound = _bound_names_in_generators(node.generators)
+            for expr in (node.key, node.value):
+                err = _check_result_expr(expr, bound)
+                if err:
+                    return err
+
+    return None
+
+
 def tool_create(arguments: dict[str, object], *, tool_library: Path) -> ToolExecutionResult:
     """Create generated-tool source and metadata without manifest registration."""
 
@@ -281,6 +359,10 @@ def tool_create(arguments: dict[str, object], *, tool_library: Path) -> ToolExec
         ast.parse(code)
     except SyntaxError as exc:
         return ToolExecutionResult(success=False, output="", error=f"Python 문법 오류: {exc}")
+
+    semantic_error = _check_code_semantics(code)
+    if semantic_error:
+        return ToolExecutionResult(success=False, output="", error=f"코드 의미 오류: {semantic_error}")
 
     tool_library.mkdir(parents=True, exist_ok=True)
     code_path = tool_library / f"{name}.py"

@@ -95,6 +95,50 @@ CLI
 - manifest와 generated tool 파일이 불일치하거나 파일이 사라진 경우 loader 실패로 분류한다.
 - Docker, virtualenv, 제한 유저, 개발 환경별 sandbox profile은 이후 환경이 정해진 뒤 검토한다.
 
+### 2026-05-02: Docker sandbox 제거 — subprocess LocalSandboxBackend만 유지
+
+- `DockerSandboxBackend`, `is_docker_available()`, `create_sandbox()`, `_copy_workspace_to()` 제거.
+- `LocalSandboxBackend`(subprocess) 단일 백엔드로 정리.
+- `config.py`의 `sandbox_backend`, `docker_image`, `docker_memory` 필드 제거.
+- 이유: 운영 환경에서 Docker를 요구하지 않도록 의존성을 최소화. 컨테이너 sandbox는 향후 환경이 확정되면 재검토.
+
+### 2026-05-02: Anthropic·Grok provider 제거
+
+- `config.py`의 `anthropic_model`, `grok_model` 필드 제거, `from_env()` 항목 제거.
+- `llms/factory.py`에서 해당 분기 제거.
+- 이유: 사용자가 구현하지 않기로 결정. OpenAI·Gemini·Ollama 3가지 provider만 유지.
+
+### 2026-05-02: Multi-agent 병렬 실행 구현
+
+- `{"action":"parallel","actions":[...]}` 정규화 플랜 형식 추가.
+- `ExecutorAgent._run_parallel_plan()`이 `ThreadPoolExecutor`로 sub-action들을 동시 실행.
+- 결과는 `AgentState.parallel_results`에 수집. 상태 동시 쓰기 경쟁을 피하기 위해 병렬 실행 중 `last_tool_name` 등 단일 상태는 갱신하지 않음.
+- `PlanAgent`의 next_node 라우팅에 `"parallel"` action 조건 추가(`agents/plan.py`).
+
+### 2026-05-02: 서비스 정식 실행 스크립트 추가 (scripts/start.sh)
+
+- 환경 점검(Python 버전, .venv, requirements.txt, .env 로드, provider 자동 감지), 단위 테스트, LLM smoke test, 대화형 CLI 루프를 하나의 스크립트로 통합.
+- `--check-only`, `--provider`, 단일 task 인수 지원.
+
+### 2026-05-02: AAVS 시나리오 테스트에서 발견한 시스템 버그 3건 수정
+
+AAVS(AdaptiveAgent Validation Scenarios)를 OpenAI·Gemini·Ollama에서 실제 실행하면서 시스템 수준 버그를 발견하고 수정했다. 테스트 조건을 우회하는 방식이 아니라 시스템 자체를 수정하는 방향으로 진행.
+
+**버그 1 — 자가 교정 성공 후 error_log 미초기화**
+- 증상: 자가 교정 루프에서 재실행이 성공해도 `state.error_log`에 이전 실패 에러가 남아있어, Critic이 성공한 실행을 `retry`로 분류.
+- 원인: `ExecutorAgent._run_self_correction_loop()`의 성공 분기에서 `error_log` 초기화 누락.
+- 수정: `if outcome.success:` 직전에 `state.error_log = ""` 추가.
+
+**버그 2 — Critic의 next_node 직접 기입 신뢰**
+- 증상: LLM이 `{"verdict":"success","next_node":"approve"}` 같이 verdict와 맞지 않는 next_node를 직접 기입하면 그대로 승인 대기 상태로 빠짐.
+- 원인: `agent.py`의 `_normalize_critique()`가 LLM이 반환한 `next_node`를 그대로 신뢰.
+- 수정: verdict를 기준으로 next_node를 항상 코드에서 결정하는 `_verdict_to_node` 매핑 도입. LLM의 next_node 값은 무시.
+
+**버그 3 — Critic의 과거 reflection 편향**
+- 증상: 첫 실행 실패(stdin 의존) → Critic이 `retry` + reflection 기록. 두 번째 실행 성공(데이터 직접 임베드) → Critic이 여전히 `retry` 반환. `state.reflections`에 첫 실패 반성이 남아 LLM Critic을 편향시킴.
+- 원인: `critic.txt` 프롬프트가 prior reflections를 참조할 때 현재 성공 여부보다 과거 실패 정황을 우선하는 경향.
+- 수정: `critic.txt`에 규칙 추가 — "latest tool result success=true이고 output이 비어있지 않고 error log가 비어있으면 prior reflections와 무관하게 verdict:success를 반환해야 한다. prior reflections는 역사적 맥락이며 현재 성공한 실행을 override하지 않는다." EXECUTION WORKFLOW에도 latest tool result를 가장 먼저 확인하는 단계 명시.
+
 ## 추가 요구사항
 
 ### 2026-05-02: 작업 전달 방식

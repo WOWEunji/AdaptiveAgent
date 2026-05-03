@@ -347,6 +347,52 @@ class AdaptiveAgent:
             parsed = response
         return self._normalize_critique(parsed, fallback_response=response)
 
+    def _normalize_json_control_chars(self, text: str) -> str:
+        """Normalize LLM-generated JSON with invalid escape sequences or bare control chars.
+
+        Handles two classes of RFC 8259 violations commonly produced by LLMs:
+        1. Bare control characters (newlines, tabs, etc.) inside string values.
+        2. Non-standard escape sequences (e.g. \\' for apostrophe) that are valid
+           in Python/JavaScript but are undefined in JSON.
+
+        For case 2: if a backslash is followed by a character not in the set of
+        valid JSON escapes (", \\, /, b, f, n, r, t, u), the backslash is dropped
+        and the character is emitted as-is, because most such characters do not
+        need escaping inside JSON strings.
+        """
+        _VALID_JSON_AFTER_BACKSLASH = frozenset('"\\' + "/bfnrtu")
+        _CTRL_MAP = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+        result: list[str] = []
+        in_string = False
+        pending_backslash = False
+
+        for ch in text:
+            if pending_backslash:
+                pending_backslash = False
+                if ch in _VALID_JSON_AFTER_BACKSLASH:
+                    result.append("\\")
+                    result.append(ch)
+                else:
+                    # Invalid JSON escape (e.g. \' \a \x): drop backslash, keep char.
+                    result.append(ch)
+            elif in_string and ch == "\\":
+                pending_backslash = True
+            elif ch == '"':
+                result.append(ch)
+                in_string = not in_string
+            elif in_string and ch in _CTRL_MAP:
+                result.append(_CTRL_MAP[ch])
+            elif in_string and ord(ch) < 0x20:
+                result.append(f"\\u{ord(ch):04x}")
+            else:
+                result.append(ch)
+
+        if pending_backslash:
+            result.append("\\")
+
+        return "".join(result)
+
     def _loads_plan_json(self, response: str) -> object:
         """Decode nested or fenced LLM plan JSON into a Python object."""
 
@@ -361,15 +407,57 @@ class AdaptiveAgent:
                 parsed = json.loads(stripped)
                 continue
             except json.JSONDecodeError:
-                extracted = self._extract_json_object(stripped)
-                if extracted == stripped:
-                    return parsed
-                try:
-                    parsed = json.loads(extracted)
-                    continue
-                except json.JSONDecodeError:
-                    return parsed
+                pass
+            # Some LLMs emit literal newlines/control chars inside JSON strings.
+            try:
+                parsed = json.loads(self._normalize_json_control_chars(stripped))
+                continue
+            except json.JSONDecodeError:
+                pass
+            extracted = self._extract_json_object(stripped)
+            if extracted == stripped:
+                repaired = self._repair_truncated_json(stripped)
+                if repaired is not None:
+                    return repaired
+                return parsed
+            try:
+                parsed = json.loads(extracted)
+                continue
+            except json.JSONDecodeError:
+                pass
+            try:
+                parsed = json.loads(self._normalize_json_control_chars(extracted))
+                continue
+            except json.JSONDecodeError:
+                pass
+            repaired = self._repair_truncated_json(extracted)
+            if repaired is not None:
+                return repaired
+            # extracted may have been mis-cut (rfind catches a } inside a string
+            # value).  Fall back to repairing the original uncut text.
+            if extracted != stripped:
+                repaired = self._repair_truncated_json(stripped)
+                if repaired is not None:
+                    return repaired
+            return parsed
         return parsed
+
+    def _repair_truncated_json(self, text: str) -> object | None:
+        """Try to fix a JSON object truncated before its closing braces or string delimiters.
+
+        LLMs that hit token limits may produce JSON where the innermost string value
+        (e.g. a code field) is not closed.  We try successively longer suffixes that
+        close open strings and then the enclosing objects.
+        """
+
+        if not text.strip().startswith("{"):
+            return None
+        for extra in ("}", "}}", "}}}", '"}}', '"}}}', '")}', '")}}"'):
+            try:
+                return json.loads(text + extra)
+            except json.JSONDecodeError:
+                continue
+        return None
 
     def _extract_json_object(self, text: str) -> str:
         """Extract the outermost JSON object candidate from free-form text."""
@@ -486,11 +574,23 @@ class AdaptiveAgent:
 
         arguments = parsed.get("arguments", {})
         if not isinstance(arguments, dict):
-            return {
-                "action": "respond",
-                "response": "툴 실행 인자가 객체가 아니어서 실행하지 않았습니다.",
-                "_validation_error": "invalid_tool_arguments",
-            }
+            # LLMs occasionally wrap the arguments object in an array.
+            # Unwrap single-element list: [{"key": "val"}] → {"key": "val"}
+            # Unwrap list of [key, val] pairs:  [["key","val"]] → {"key":"val"}
+            if isinstance(arguments, list):
+                if len(arguments) == 1 and isinstance(arguments[0], dict):
+                    arguments = arguments[0]
+                elif arguments and all(
+                    isinstance(item, (list, tuple)) and len(item) == 2
+                    for item in arguments
+                ):
+                    arguments = dict(arguments)
+            if not isinstance(arguments, dict):
+                return {
+                    "action": "respond",
+                    "response": "툴 실행 인자가 객체가 아니어서 실행하지 않았습니다.",
+                    "_validation_error": "invalid_tool_arguments",
+                }
         arguments = self._normalize_tool_arguments(tool_name, arguments, parsed)
         return {"action": "tool", "tool_name": tool_name, "arguments": arguments}
 
