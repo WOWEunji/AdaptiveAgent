@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -102,9 +103,17 @@ def _unwrap_double_encoded_code(generated: dict[str, Any]) -> dict[str, Any]:
             return obj if isinstance(obj, dict) else None
         except json.JSONDecodeError:
             pass
-        # Some LLMs append stray ")" or "'" after a valid JSON string close quote,
-        # and omit the outer object's closing "}".  Strip only the trailing garbage
-        # (never strip '"' — it may be the string close we need) and repair.
+        # Pattern: {"code":"...print(result))")} — stray ")" sits between the
+        # string-close quote and the outer object-close brace.  Remove it.
+        cleaned = re.sub(r'"\)(}+)$', r'"\1', text)
+        if cleaned != text:
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(cleaned)
+                return obj if isinstance(obj, dict) else None
+            except json.JSONDecodeError:
+                pass
+        # Some LLMs omit the outer "}" and append stray chars — strip trailing
+        # garbage (never strip '"') and try adding closing braces.
         trimmed = text.rstrip("') \t\r\n")
         if trimmed.endswith('"'):
             for suffix in ("}", '"}', '"}}'):
