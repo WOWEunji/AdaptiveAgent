@@ -591,6 +591,8 @@ poetry run adaptive-agent --workspace ~/my-ws --llm openai test
 
 `--workspace`는 스킬 라이브러리와 로그가 저장되는 경로다. 생략하면 실행마다 임시 경로가 생성되어 스킬이 유지되지 않는다.
 
+interactive 모드에서 긴 입력은 줄 끝에 `\`를 입력하고 Enter로 이어서 작성할 수 있다.
+
 ---
 
 ## 참고 문헌
