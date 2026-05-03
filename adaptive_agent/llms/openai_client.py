@@ -53,7 +53,7 @@ def format_openai_api_error(*, status_code: int | None, message: str, model: str
         return (
             "OpenAI 모델 요청이 실패했습니다(400). "
             f"모델명 `{model}`이 현재 계정/API에서 사용 가능한지 확인하세요. "
-            "예: gpt-5-nano 또는 gpt-5.4-mini. "
+            "예: gpt-5.4-nano 또는 gpt-5.4-mini. "
             f"원본: {message}"
         )
     return None

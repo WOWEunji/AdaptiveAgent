@@ -8,7 +8,7 @@
 
 | 모델 | 프로바이더 | API |
 |------|:----:|:----:|
-| gpt-5-nano   | OpenAI | Responses API |
+| gpt-5.4-nano | OpenAI | Responses API |
 | gpt-5.4-mini | OpenAI | Responses API |
 | qwen3.5:2b   | Ollama | REST |
 | qwen3.5:4b   | Ollama | REST |
@@ -24,7 +24,7 @@
 | gpt-4o-mini  | 15/16 (94%) | AAVS-009만 실패 (모델 한계) |
 | qwen3.5:2b   | 미측정 (재측정 필요) | — |
 | qwen3.5:4b   | 미측정 (재측정 필요) | — |
-| gpt-5-nano   | 미측정 (재측정 필요) | — |
+| gpt-5.4-nano | 미측정 (재측정 필요) | — |
 | gpt-5.4-mini | 미측정 (재측정 필요) | — |
 
 ---

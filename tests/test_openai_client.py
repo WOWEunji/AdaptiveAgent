@@ -17,7 +17,7 @@ class OpenAIClientTest(unittest.TestCase):
 
         self.assertIsNotNone(message)
         self.assertIn("gpt-5.2-nano", message)
-        self.assertIn("gpt-5-nano", message)
+        self.assertIn("gpt-5.4-nano", message)
         self.assertIn("gpt-5.4-mini", message)
 
 
