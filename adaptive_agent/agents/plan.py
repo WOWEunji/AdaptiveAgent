@@ -22,12 +22,14 @@ class PlanAgent(BaseRoleAgent):
         """Store the generated plan and choose the next router node."""
 
         plan = self.planner(state)
-        state.step_count += 1
         state.current_plan = dict(plan)
 
         validation_error = plan.pop("_validation_error", None)
         if validation_error:
+            state.failure_count += 1
             state.record_event("plan_validation_failed", reason=validation_error)
+        else:
+            state.step_count += 1
         state.record_event("task_analyzed", action=plan.get("action", "respond"), agent_role=self.role)
 
         arguments = plan.get("arguments") or {}
