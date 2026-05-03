@@ -1,0 +1,37 @@
+[tool.poetry]
+name = "adaptive-agent"
+version = "0.1.0"
+description = "CLI 기반 AdaptiveAgent — 자연어 작업을 분석해 내장/생성 도구로 실행하는 오픈 코어 에이전트."
+authors = ["WowEunji <ggss5927@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/WOWEunji/AdaptiveAgent"
+repository = "https://github.com/WOWEunji/AdaptiveAgent"
+keywords = ["agent", "llm", "cli", "tool-use", "skill-library"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+packages = [{ include = "adaptive_agent" }]
+
+[tool.poetry.dependencies]
+python = ">=3.10"
+ollama = "*"
+openai = ">=1.40.0"
+google-genai = ">=1.0.0"
+python-dotenv = "*"
+
+[tool.poetry.group.dev.dependencies]
+mypy = "*"
+pytest = "*"
+
+[tool.poetry.scripts]
+adaptive-agent = "adaptive_agent.cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
