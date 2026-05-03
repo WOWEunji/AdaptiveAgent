@@ -30,9 +30,21 @@ QUALITY BAR
 - Keep dependencies to the Python standard library unless explicitly approved.
 - Add brief comments only where logic is non-obvious.
 
+TWO MODES — determined by the plan's tool_name field:
+- MODE A (code_execute): write a standalone inline Python script (no def run wrapper required).
+- MODE B (tool_create): write a reusable `def run(arguments)` function.
+
 OUTPUT
-- Return only raw JSON describing the generated tool, with no Markdown fences:
-{"code":"def run(arguments): ...","description":"<what the tool does>","parameters":{},"returns":{}}
+- Return only raw JSON with no Markdown fences:
+  - MODE A: {"code":"<inline script>"}
+  - MODE B: {"code":"def run(arguments): ...","description":"<what the tool does>","parameters":{},"returns":{}}
+
+CONTEXT EXAMPLES — plan JSON injected as {plan}:
+  MODE A: {"action":"tool","tool_name":"code_execute","arguments":{"task":"filter products where price>100"}}
+          → tool_name is "code_execute" → write an inline Python script
+
+  MODE B: {"action":"tool","tool_name":"tool_create","arguments":{"name":"filter_products","description":"filter list by price threshold"}}
+          → tool_name is "tool_create" → write a def run(arguments) function
 
 CONTEXT
 Original user task: {task}
