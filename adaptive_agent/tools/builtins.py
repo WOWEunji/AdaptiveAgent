@@ -804,7 +804,12 @@ def _dedupe_tool_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, 
         if existing is None:
             deduped[name] = tool
             continue
+        # Builtin always wins over non-builtin
         if str(existing.get("source") or "builtin") != "builtin" and str(tool.get("source") or "") == "builtin":
+            deduped[name] = tool
+            continue
+        # Prefer the version with a higher score (catalog entry with score beats registry entry without)
+        if float(tool.get("score", 0) or 0) > float(existing.get("score", 0) or 0):
             deduped[name] = tool
     return sorted(deduped.values(), key=lambda item: (-float(item.get("score", 1) or 1), str(item.get("name", ""))))
 

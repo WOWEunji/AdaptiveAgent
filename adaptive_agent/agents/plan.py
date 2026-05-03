@@ -30,13 +30,14 @@ class PlanAgent(BaseRoleAgent):
             state.record_event("plan_validation_failed", reason=validation_error)
         state.record_event("task_analyzed", action=plan.get("action", "respond"), agent_role=self.role)
 
-        arguments = plan.get("arguments")
-        if (
+        arguments = plan.get("arguments") or {}
+        needs_coding = (
             plan.get("action") == "tool"
-            and plan.get("tool_name") == "tool_create"
+            and plan.get("tool_name") in {"code_execute", "tool_create"}
             and isinstance(arguments, dict)
             and not isinstance(arguments.get("code"), str)
-        ):
+        )
+        if needs_coding:
             next_node = "code"
         elif plan.get("action") in {"tool", "parallel"}:
             next_node = "execute"

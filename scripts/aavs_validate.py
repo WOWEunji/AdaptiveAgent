@@ -10,13 +10,14 @@ to pass a single fixture.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ SUPPORTED_SCENARIOS = ", ".join(
         "AAVS-007", "AAVS-008", "AAVS-009",
         "AAVS-010", "AAVS-011", "AAVS-012", "AAVS-013",
         "AAVS-014", "AAVS-015",
+        "AAVS-016", "AAVS-017", "AAVS-018",
     )
 )
 UNSUPPORTED_SCENARIOS_NOTE = (
@@ -57,6 +59,9 @@ class Scenario:
     notes: str = ""
     step2_mode: str = ""  # "approve" | "reject" | ""
     step2_output_contains_any: tuple[str, ...] = ()
+    # Skill-library testing fields
+    setup_skills: tuple[dict, ...] = ()   # skills to pre-populate in manifest before agent runs
+    step2_task: str = ""                  # independent second task run against the same tool_library
 
 
 @dataclass
@@ -113,6 +118,65 @@ class ScenarioRecord:
                 "",
             ]
         )
+
+
+# ---------------------------------------------------------------------------
+# Pre-built skill definitions used by AAVS-016/017/018 setup_skills fields.
+# Each dict must have: name, description, tags (list[str]), code (str).
+# ---------------------------------------------------------------------------
+_SKILL_COMPUTE_AVERAGE = {
+    "name": "compute_average_hp",
+    "description": (
+        "Filter a JSON array of records by a minimum value on a numeric field and compute "
+        "average, count, and total. "
+        "Arguments: records (JSON array string, also accepted as data/json_data/items), "
+        "field (field name to aggregate, default 'hp'), "
+        "min_value (minimum threshold, default 0). "
+        "Returns: {average, count, total}."
+    ),
+    "tags": ["json", "average", "filter", "aggregate", "hp", "numeric", "compute"],
+    "parameters": {
+        "records": {"type": "string", "description": "JSON array string (also: data, json_data, items)"},
+        "field": {"type": "string", "description": "numeric field name to aggregate (default: hp)"},
+        "min_value": {"type": "number", "description": "minimum threshold for filtering (default: 0)"},
+    },
+    "code": "\n".join([
+        "def run(arguments):",
+        "    import json",
+        "    raw = (arguments.get('records') or arguments.get('data') or",
+        "           arguments.get('json_data') or arguments.get('items') or '[]')",
+        "    records = raw if isinstance(raw, list) else json.loads(str(raw))",
+        "    field = str(arguments.get('field', 'hp'))",
+        "    min_value = float(arguments.get('min_value', 0))",
+        "    filtered = [r for r in records if isinstance(r, dict) and float(r.get(field, 0)) >= min_value]",
+        "    if not filtered:",
+        "        return {'average': None, 'count': 0}",
+        "    total = sum(float(r[field]) for r in filtered)",
+        "    return {'average': total / len(filtered), 'count': len(filtered), 'total': total}",
+        "",
+    ]),
+}
+
+_SKILL_CSV_DEDUP_SORT = {
+    "name": "csv_dedup_sort",
+    "description": (
+        "Remove duplicate rows from CSV text and sort remaining rows by a specified field. "
+        "Returns deduplicated and sorted rows as a list of dicts. "
+        "Use for CSV row deduplication and date/field ordering tasks."
+    ),
+    "tags": ["csv", "deduplicate", "dedup", "sort", "rows", "date"],
+    "code": "\n".join([
+        "def run(arguments):",
+        "    import csv, io, json",
+        "    csv_text = str(arguments.get('csv_text', ''))",
+        "    sort_field = str(arguments.get('sort_field', 'date'))",
+        "    rows = list(csv.DictReader(io.StringIO(csv_text)))",
+        "    unique = list({tuple(sorted(r.items())): r for r in rows}.values())",
+        "    result = sorted(unique, key=lambda r: r.get(sort_field, ''))",
+        "    return {'rows': result, 'count': len(result)}",
+        "",
+    ]),
+}
 
 
 SCENARIOS: tuple[Scenario, ...] = (
@@ -329,6 +393,69 @@ SCENARIOS: tuple[Scenario, ...] = (
         step2_output_contains_any=("rejected", "discarded", "거부", "취소", "not saved"),
         notes="Two-step scenario: step1 creates and validates tool (approval_required); step2 resumes with --reject; manifest must remain empty.",
     ),
+    Scenario(
+        scenario_id="AAVS-016",
+        title="Pre-saved skill retrieved and used for matching task",
+        prompt=(
+            "From the JSON data below, identify monsters with hp >= 100 and compute their "
+            "average hp. Use an available tool if one exists, otherwise generate and execute code. "
+            "Answer from the execution result.\n"
+            '[{"name":"Goblin","hp":80},{"name":"Orc","hp":150},{"name":"Dragon","hp":300}]'
+        ),
+        required_events=("task_received", "task_analyzed"),
+        stdout_contains=("225",),
+        setup_skills=(_SKILL_COMPUTE_AVERAGE,),
+        notes=(
+            "skill_retrieval: one pre-saved skill (compute_average_hp) in manifest. "
+            "Agent must retrieve it (skills_retrieved.count >= 1) and produce the correct answer 225."
+        ),
+    ),
+    Scenario(
+        scenario_id="AAVS-017",
+        title="Correct skill selected from multi-skill library for CSV task",
+        prompt=(
+            "Remove duplicate rows from the CSV below, then sort the remaining rows by date in "
+            "ascending order. Use an available tool if one exists, otherwise generate and execute code. "
+            "Answer from the execution result.\n"
+            "date,name,score\n"
+            "2026-04-03,Alice,10\n"
+            "2026-04-01,Bob,20\n"
+            "2026-04-03,Alice,10\n"
+            "2026-04-02,Charlie,15"
+        ),
+        required_events=("task_received", "task_analyzed"),
+        stdout_contains=("2026-04-01", "2026-04-02", "2026-04-03"),
+        setup_skills=(_SKILL_COMPUTE_AVERAGE, _SKILL_CSV_DEDUP_SORT),
+        notes=(
+            "skill_retrieval: two pre-saved skills. "
+            "Agent must retrieve skills (count >= 1) and produce correct sorted dates. "
+            "csv_dedup_sort is the relevant skill; compute_average_hp should not be chosen for this task."
+        ),
+    ),
+    Scenario(
+        scenario_id="AAVS-018",
+        title="Pre-saved skill persists across two independent task calls",
+        prompt=(
+            "From the JSON data below, identify monsters with hp >= 100 and compute their "
+            "average hp. Use an available tool if one exists, otherwise generate and execute code. "
+            "Answer from the execution result.\n"
+            '[{"name":"Goblin","hp":80},{"name":"Orc","hp":150},{"name":"Dragon","hp":300}]'
+        ),
+        required_events=("task_received", "task_analyzed"),
+        stdout_contains=("225",),
+        setup_skills=(_SKILL_COMPUTE_AVERAGE,),
+        step2_task=(
+            "From the JSON data below, list the names of all monsters with hp >= 100. "
+            "Use an available tool if one exists, otherwise generate and execute code. "
+            "Answer from the execution result.\n"
+            '[{"name":"Goblin","hp":80},{"name":"Orc","hp":150},{"name":"Dragon","hp":300}]'
+        ),
+        notes=(
+            "cross_session: step1 and step2 share the same tool_library (same pre-populated manifest). "
+            "Both calls must retrieve the saved skill (skills_retrieved.count >= 1 in each). "
+            "Tests that skill manifest persists across independent sessions."
+        ),
+    ),
 )
 
 
@@ -432,6 +559,40 @@ def parse_timeout_seconds(raw_timeout: str, provider: str) -> float:
         raise SystemExit(f"--timeout-seconds must be a number, got: {raw_timeout!r}") from exc
 
 
+def _write_setup_manifest(tools_dir: Path, setup_skills: tuple[dict, ...]) -> None:
+    """Write a pre-populated manifest.json so the agent can retrieve skills on the first call."""
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    now = utc_now()
+    entries = []
+    for skill in setup_skills:
+        name = skill["name"]
+        code = skill.get("code", "def run(arguments):\n    return {}\n")
+        py_path = tools_dir / f"{name}.py"
+        py_path.write_text(code, encoding="utf-8")
+        file_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        entries.append({
+            "name": name,
+            "description": skill.get("description", ""),
+            "category": "generated",
+            "tags": skill.get("tags", []),
+            "file_path": str(py_path),
+            "file_hash": file_hash,
+            "parameters": skill.get("parameters", {}),
+            "returns": skill.get("returns", {}),
+            "validation_status": "passed",
+            "approval_status": "approved",
+            "created_at": now,
+            "updated_at": now,
+            "usage_count": 0,
+            "failure_count": 0,
+            "reflections": [],
+        })
+    manifest = {"schema_version": 1, "tools": sorted(entries, key=lambda e: e["name"])}
+    (tools_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def run_scenario(
     scenario: Scenario,
     *,
@@ -452,6 +613,10 @@ def run_scenario(
         run_env["ADAPTIVE_AGENT_TOOL_LIBRARY"] = str(Path(temp_dir) / "tools")
         if scenario.step2_mode:
             run_env["ADAPTIVE_AGENT_SESSION_DIR"] = str(Path(temp_dir) / "sessions")
+
+        if scenario.setup_skills:
+            _write_setup_manifest(Path(run_env["ADAPTIVE_AGENT_TOOL_LIBRARY"]), scenario.setup_skills)
+
         try:
             completed = subprocess.run(
                 command,
@@ -504,6 +669,26 @@ def run_scenario(
                     except json.JSONDecodeError:
                         manifest_contents = {}
 
+        elif scenario.step2_task and returncode == 0:
+            command2_task = [sys.executable, "-m", "adaptive_agent", "--json", "--llm", provider, scenario.step2_task]
+            try:
+                completed2 = subprocess.run(
+                    command2_task,
+                    cwd=REPO_ROOT,
+                    env=run_env,
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+                step2_returncode = completed2.returncode
+                step2_parsed = parse_result(completed2.stdout)
+                if step2_returncode:
+                    stderr = (stderr + "\n[step2] " + completed2.stderr).strip()
+            except subprocess.TimeoutExpired as exc2:
+                step2_returncode = 124
+                stderr = (stderr + f"\n[step2] Timed out after {timeout_seconds:g}s").strip()
+
     completed_at = utc_now()
     parsed = parse_result(stdout)
     checks = evaluate_scenario(
@@ -513,7 +698,13 @@ def run_scenario(
         manifest_contents=manifest_contents,
     )
     passed = all(checks.values()) if scenario.expect_pass else not all(checks.values())
-    step_note = f" step2_mode={scenario.step2_mode!r}" if scenario.step2_mode else ""
+    extra_note = ""
+    if scenario.step2_mode:
+        extra_note = f" step2_mode={scenario.step2_mode!r}"
+    elif scenario.step2_task:
+        extra_note = " step2_task=yes"
+    if scenario.setup_skills:
+        extra_note += f" setup_skills={len(scenario.setup_skills)}"
     return ScenarioRecord(
         scenario_id=scenario.scenario_id,
         title=scenario.title,
@@ -531,7 +722,7 @@ def run_scenario(
         passed=passed,
         failure_classification=classify_failure(returncode, parsed, checks),
         validation_scope=build_validation_scope(parsed),
-        notes=f"{scenario.notes}{step_note} timeout_seconds={timeout_seconds:g}".strip(),
+        notes=f"{scenario.notes}{extra_note} timeout_seconds={timeout_seconds:g}".strip(),
     )
 
 
@@ -620,6 +811,37 @@ def evaluate_scenario(
                     checks["step2_manifest_empty"] = not tools if isinstance(tools, list) else not bool(tools)
                 else:
                     checks["step2_manifest_empty"] = True
+
+    if scenario.setup_skills:
+        retrieval_events = [
+            e for e in parsed.get("events", [])
+            if isinstance(e, dict) and e.get("name") == "skills_retrieved"
+        ]
+        if retrieval_events:
+            retrieved_count = retrieval_events[0].get("details", {}).get("count", 0)
+            checks["skills_retrieved_count"] = retrieved_count >= 1
+        else:
+            checks["skills_retrieved_count"] = False
+
+    if scenario.step2_task:
+        if step2_returncode is None:
+            checks["step2_task_executed"] = False
+            checks["step2_skills_retrieved"] = False
+        else:
+            checks["step2_task_executed"] = step2_returncode == 0
+            if step2_parsed:
+                s2_retrieval = [
+                    e for e in step2_parsed.get("events", [])
+                    if isinstance(e, dict) and e.get("name") == "skills_retrieved"
+                ]
+                if s2_retrieval:
+                    s2_count = s2_retrieval[0].get("details", {}).get("count", 0)
+                    checks["step2_skills_retrieved"] = s2_count >= 1
+                else:
+                    checks["step2_skills_retrieved"] = False
+            else:
+                checks["step2_skills_retrieved"] = False
+
     return checks
 
 
