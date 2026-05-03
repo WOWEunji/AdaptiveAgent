@@ -31,7 +31,7 @@ class AgentConfig:
     tool_library_dir: Path = Path.cwd() / ".adaptive_agent" / "tools"
     session_dir: Path = Path.cwd() / ".adaptive_agent" / "sessions"
     max_self_corrections: int = 2
-    max_router_steps: int = 8
+    max_router_steps: int = 12
     session_ttl_hours: int = 7 * 24
     session_max_count: int = 500
     artifact_dir: Path = Path.cwd() / ".adaptive_agent" / "artifacts"
@@ -89,7 +89,7 @@ class AgentConfig:
             session_dir=session_dir,
             artifact_dir=artifact_dir,
             max_self_corrections=int(os.getenv("ADAPTIVE_AGENT_MAX_SELF_CORRECTIONS", "2")),
-            max_router_steps=int(os.getenv("ADAPTIVE_AGENT_MAX_ROUTER_STEPS", "8")),
+            max_router_steps=int(os.getenv("ADAPTIVE_AGENT_MAX_ROUTER_STEPS", "12")),
             session_ttl_hours=int(os.getenv("ADAPTIVE_AGENT_SESSION_TTL_HOURS", str(7 * 24))),
             session_max_count=int(os.getenv("ADAPTIVE_AGENT_SESSION_MAX_COUNT", "500")),
             ollama_port=int(os.getenv("OLLAMA_PORT", "11434")),

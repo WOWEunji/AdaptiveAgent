@@ -15,7 +15,7 @@ MODE A — code_execute (one-shot inline script)
 MODE B — tool_create (reusable function)
   Triggered when: plan tool_name is "tool_create"
   What to write: a reusable def run(arguments) function
-  Output JSON: {"code":"def run(arguments): ...","description":"<purpose>","parameters":{},"returns":{}}
+  Output JSON: {"code":"def run(arguments): ...","description":"<purpose>","parameters":{},"returns":{},"sample_arguments":{"<input_key>":"<valid JSON string example>"}}
 
 SHARED RULES
 - NEVER use open(), file I/O, or filesystem reads. Accept all input data through the task text or arguments only.
@@ -28,14 +28,13 @@ SHARED RULES
 
 MODE A CODE SHAPE (inline script):
 
-[JSON array: filter + aggregate]
+[JSON array: filter + aggregate — always wrap the data in json.loads('[...]') with the outer brackets]
 import json
-records = json.loads('<embed exact JSON array from task>')
-filtered = [r for r in records if r['field'] > threshold]
-groups = {}
-for r in filtered:
-    groups.setdefault(r['key'], []).append(r['value'])
-result = {k: sum(v)/len(v) for k, v in groups.items()}
+records = json.loads('<embed exact JSON array from task including the [ ] brackets>')
+filtered = [r for r in records if r['field'] >= threshold]
+values = [r['value'] for r in filtered]
+avg = sum(values) / len(values) if values else 0
+result = {'count': len(filtered), 'average': avg, 'names': [r['name'] for r in filtered]}
 print(json.dumps(result))
 
 [CSV: deduplicate + sort]
@@ -65,10 +64,14 @@ WRONG patterns (never do these):
   return compute(result)           # compute() not defined in same code block
   run({'x': "[{'k':1}]"})          # single-quote strings are not valid JSON — use double quotes
 
+OUTPUT RULE (both modes) — the "code" value must always be raw Python source, never a nested JSON object:
+  WRONG: {"code": "{\"code\": \"import json...\"}"} or {"code": "{\"code\": \"def run...\"}"} ← double-encoded
+  RIGHT: {"code": "import json..."} or {"code": "def run(arguments): ..."}
+
 OUTPUT
 Return only raw JSON with no Markdown fences:
 - MODE A: {"code":"<inline script>"}
-- MODE B: {"code":"def run(arguments): ...","description":"<what the tool does>","parameters":{},"returns":{}}
+- MODE B: {"code":"def run(arguments): ...","description":"<what the tool does>","parameters":{},"returns":{},"sample_arguments":{"<input_key>":"[{\"<flag>\": true, \"<value>\": 10}]"}}
 
 CONTEXT EXAMPLES — plan JSON injected as {plan}:
   MODE A: {"action":"tool","tool_name":"code_execute","arguments":{"task":"filter products where price>100"}}

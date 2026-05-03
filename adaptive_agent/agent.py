@@ -181,10 +181,16 @@ class AdaptiveAgent:
 
         if tool_name == "tool_create" and isinstance(output, dict):
             tool_name_from_output = str(output.get("name") or "")
+            validate_arguments: dict[str, Any] = {"name": tool_name_from_output}
+            # Forward sample_arguments from the coder so tool_validate can run a real sample
+            # call instead of run({}), which raises ValueError/KeyError for tools that require input.
+            sample_args = (state.current_plan.get("arguments") or {}).get("sample_arguments")
+            if isinstance(sample_args, dict) and sample_args:
+                validate_arguments["sample_arguments"] = sample_args
             state.current_plan = {
                 "action": "tool",
                 "tool_name": "tool_validate",
-                "arguments": {"name": tool_name_from_output},
+                "arguments": validate_arguments,
             }
             state.next_node = "execute"
             state.record_event("generated_tool_created", tool_name=tool_name_from_output)
@@ -346,13 +352,13 @@ class AdaptiveAgent:
         except json.JSONDecodeError:
             parsed = response
         critique = self._normalize_critique(parsed, fallback_response=response)
-        # If the tool succeeded AND the Critic has already issued at least one verdict on
-        # this execution, block a second retry to prevent infinite critique loops.
-        prior_critiques = sum(1 for e in state.events if e.name == "execution_critiqued")
+        # If the tool succeeded, always block retry regardless of how many critiques have run.
+        # The prior_critiques >= 1 guard only caught second-and-later critiques; the first
+        # critique on a successful execution could still issue retry and trigger an extra
+        # plan→execute→critique cycle (observed in AAVS-009, AAVS-013).
         if (
             state.last_tool_result
             and state.last_tool_result.get("success")
-            and prior_critiques >= 1
             and critique.get("verdict") == "retry"
         ):
             critique["verdict"] = "success"
@@ -458,28 +464,90 @@ class AdaptiveAgent:
         """Try to fix a JSON object truncated before its closing braces or string delimiters.
 
         LLMs that hit token limits may produce JSON where the innermost string value
-        (e.g. a code field) is not closed.  We try successively longer suffixes that
-        close open strings and then the enclosing objects.
+        (e.g. a code or description field) is not closed.  We count unclosed braces
+        to build an appropriate suffix, then try a fixed set of fallbacks.
         """
 
-        if not text.strip().startswith("{"):
+        stripped = text.strip()
+        if not stripped.startswith("{"):
             return None
-        for extra in ("}", "}}", "}}}", '"}}', '"}}}', '")}', '")}}"'):
+
+        # Count unclosed braces outside of string literals to build a targeted suffix.
+        depth = 0
+        in_string = False
+        escaped = False
+        for ch in stripped:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\" and in_string:
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if not in_string:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+
+        # Build closing suffix from depth count (capped to avoid runaway).
+        if 1 <= depth <= 6:
+            dynamic_suffix = "}" * depth
             try:
-                return json.loads(text + extra)
+                return json.loads(stripped + dynamic_suffix)
+            except json.JSONDecodeError:
+                pass
+            # Unclosed string before the braces.
+            try:
+                return json.loads(stripped + '"' + dynamic_suffix)
+            except json.JSONDecodeError:
+                pass
+
+        # Fixed fallbacks cover edge cases the depth counter misses (e.g. mid-string truncation).
+        for extra in ("}", "}}", "}}}", '"}}', '"}}}', '"}}}}', '")}', '")}}"', '"}}}}}"'):
+            try:
+                return json.loads(stripped + extra)
             except json.JSONDecodeError:
                 continue
         return None
 
     def _extract_json_object(self, text: str) -> str:
-        """Extract the outermost JSON object candidate from free-form text."""
+        """Extract the outermost JSON object from free-form text using balanced-bracket tracking.
+
+        Uses state-aware bracket counting that skips { and } inside string literals,
+        so code fields containing ``return {}`` or similar do not cause early truncation.
+        """
 
         text = self._strip_markdown_code_fence(text)
         start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
+        if start == -1:
             return text
-        return text[start : end + 1]
+
+        depth = 0
+        in_string = False
+        escaped = False
+        for i, ch in enumerate(text[start:], start):
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\" and in_string:
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if not in_string:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start : i + 1]
+
+        # No balanced close found — return from start to end of text.
+        return text[start:]
 
     def _strip_markdown_code_fence(self, text: str) -> str:
         """Remove a surrounding Markdown code fence from model output."""
@@ -777,13 +845,10 @@ class AdaptiveAgent:
     def _build_prompt(self, task: str, *, state: AgentState | None = None) -> str:
         """Render the Plan Agent prompt with available tools and task text."""
 
+        # Only name + description to keep the tool list compact and avoid token pressure
+        # that causes plan JSON truncation on smaller models.
         tools = [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "category": tool.category,
-                "usage": tool.usage,
-            }
+            {"name": tool.name, "description": tool.description}
             for tool in self.registry.list()
         ]
         return self.prompt_loader.render(

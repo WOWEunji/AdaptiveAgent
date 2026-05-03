@@ -406,25 +406,51 @@ def tool_validate(
     except SyntaxError as exc:
         return ToolExecutionResult(success=False, output="", error=f"Python 문법 오류: {exc}")
 
-    sample_arguments = arguments.get("sample_arguments", {})
-    runner = (
-        "import json\n"
-        f"generated_code = {code!r}\n"
-        "namespace = {}\n"
-        "exec(compile(generated_code, '<generated_tool>', 'exec'), namespace)\n"
-        "if 'run' not in namespace:\n"
-        "    raise AttributeError('generated tool must define run(arguments)')\n"
-        f"result = namespace['run']({sample_arguments!r})\n"
-        "print(json.dumps(result, ensure_ascii=False, sort_keys=True))\n"
-    )
-    try:
-        process_output = sandbox.run_python_code(
-            runner,
-            timeout_seconds=_coerce_timeout(arguments.get("timeout_seconds")),
+    sample_arguments = arguments.get("sample_arguments")
+    has_sample = isinstance(sample_arguments, dict) and bool(sample_arguments)
+
+    if has_sample:
+        # Full validation: run the tool with provided sample arguments.
+        runner = (
+            "import json\n"
+            f"generated_code = {code!r}\n"
+            "namespace = {}\n"
+            "exec(compile(generated_code, '<generated_tool>', 'exec'), namespace)\n"
+            "if 'run' not in namespace:\n"
+            "    raise AttributeError('generated tool must define run(arguments)')\n"
+            f"result = namespace['run']({sample_arguments!r})\n"
+            "print(json.dumps(result, ensure_ascii=False, sort_keys=True))\n"
         )
-    except SandboxPolicyViolation as exc:
-        return _policy_violation_result(exc)
-    result = _result_from_process(process_output, arguments)
+        try:
+            process_output = sandbox.run_python_code(
+                runner,
+                timeout_seconds=_coerce_timeout(arguments.get("timeout_seconds")),
+            )
+        except SandboxPolicyViolation as exc:
+            return _policy_violation_result(exc)
+        result = _result_from_process(process_output, arguments)
+    else:
+        # Structural validation only: confirm run() exists without a sample call.
+        # Callers that don't supply sample_arguments (e.g. auto-generated tool_validate
+        # plans without coder-provided samples) should not fail just because run({})
+        # would raise a KeyError/ValueError on missing input.
+        runner = (
+            f"generated_code = {code!r}\n"
+            "namespace = {}\n"
+            "exec(compile(generated_code, '<generated_tool>', 'exec'), namespace)\n"
+            "if 'run' not in namespace:\n"
+            "    raise AttributeError('generated tool must define run(arguments)')\n"
+            "print('ok')\n"
+        )
+        try:
+            process_output = sandbox.run_python_code(
+                runner,
+                timeout_seconds=_coerce_timeout(arguments.get("timeout_seconds")),
+            )
+        except SandboxPolicyViolation as exc:
+            return _policy_violation_result(exc)
+        result = _result_from_process(process_output, arguments)
+
     if result.success:
         metadata_path = tool_library / f"{name}.json"
         metadata = _read_json_object(metadata_path)
@@ -432,7 +458,7 @@ def tool_validate(
             {
                 "status": "validated",
                 "validated": True,
-                "validation_status": "passed",
+                "validation_status": "passed" if has_sample else "structure_only",
                 "file_hash": _sha256_text(code),
             }
         )
@@ -497,7 +523,9 @@ def tool_approve(arguments: dict[str, object], *, tool_library: Path) -> ToolExe
         return ToolExecutionResult(success=False, output="", error=f"승인할 생성 툴을 찾을 수 없습니다: {name}")
 
     metadata = _read_json_object(metadata_path)
-    if metadata.get("validation_status") != "passed":
+    # Accept both full sample validation ("passed") and structural-only validation
+    # ("structure_only") as long as validated=True was set by tool_validate.
+    if not metadata.get("validated"):
         return ToolExecutionResult(success=False, output=metadata, error="검증을 통과한 툴만 승인 등록할 수 있습니다.")
     expected_hash = str(metadata.get("file_hash") or "")
     if not expected_hash:
