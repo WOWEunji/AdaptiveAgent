@@ -86,23 +86,21 @@ class OpenAIClient:
         client = OpenAI(api_key=self._api_key)
         try:
             if should_use_openai_responses_api(self._model):
-                try:
-                    response = client.responses.create(
-                        model=self._model,
-                        input=prompt,
-                        reasoning={"effort": "minimal"},
-                        text={"verbosity": "low"},
-                        max_output_tokens=2048,
-                    )
-                except APIError as e:
-                    if getattr(e, "status_code", None) == 401:
-                        raise
-                    response = client.responses.create(
-                        model=self._model,
-                        input=prompt,
-                        max_output_tokens=2048,
-                    )
-                return (response.output_text or "").strip()
+                _base: dict = {"model": self._model, "input": prompt}
+                for _extra in (
+                    {"reasoning": {"effort": "minimal"}, "text": {"verbosity": "low"}, "max_output_tokens": 2048},
+                    {"max_output_tokens": 2048},
+                    {},
+                ):
+                    try:
+                        response = client.responses.create(**_base, **_extra)
+                        return (response.output_text or "").strip()
+                    except APIError as e:
+                        if getattr(e, "status_code", None) in (401, 403):
+                            raise
+                        if not _extra:
+                            raise
+                        continue
             response = client.chat.completions.create(
                 model=self._model,
                 messages=[{"role": "user", "content": prompt}],

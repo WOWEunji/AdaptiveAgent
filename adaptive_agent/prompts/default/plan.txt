@@ -40,13 +40,36 @@ VALID OUTPUT FORMS — pick exactly one:
 {"action":"tool","tool_name":"ask_human","arguments":{"questions":"<specific question>"}}
 {"action":"tool","tool_name":"tool_create","arguments":{"name":"<snake_case>","description":"<purpose>","code":"def run(arguments): ..."}}
 
-TEMPLATE — if task contains inline CSV data, use EXACTLY this pattern in the code field:
+CODE PATTERNS — use exactly these code shapes inside the code field.
+Replace only the embedded data string with the actual task data.
+
+[JSON array: filter + group + aggregate]
+import json
+records = json.loads('<embed exact JSON array from task>')
+filtered = [r for r in records if r['field'] > threshold]
+groups = {}
+for r in filtered:
+    groups.setdefault(r['key'], []).append(r['value'])
+result = {k: sum(v)/len(v) for k, v in groups.items()}
+print(json.dumps(result))
+
+[Nested JSON: access sub-object and sub-list]
+import json
+records = json.loads('<embed exact JSON from task>')
+out = []
+for rec in records:
+    label = rec['outer_key']['name_field']
+    total = sum(s['qty'] for s in rec['list_key'])
+    out.append({'label': label, 'total': total})
+print(json.dumps(out))
+
+[CSV: deduplicate + sort]
 import csv, io, json
-csv_text = """date,name,score
-row1_value,row1_value,row1_value"""
+csv_text = '<embed exact CSV from task including header>'
 rows = list(csv.DictReader(io.StringIO(csv_text)))
-# ... process rows (deduplicate, sort, filter, etc.) ...
-print(json.dumps(result))  # print the actual processed data
+unique = list({tuple(sorted(r.items())): r for r in rows}.values())
+result = sorted(unique, key=lambda r: r['sort_field'])
+print(json.dumps(result))
 
 Available tools: {available_tools}
 Retrieved skills: {retrieved_skills}

@@ -37,7 +37,7 @@ class AgentConfig:
     artifact_dir: Path = Path.cwd() / ".adaptive_agent" / "artifacts"
     ollama_port: int = 11434
     ollama_timeout_seconds: float = 60.0
-    ollama_num_predict: int = 4096
+    ollama_num_predict: int = 6144
     ollama_think: bool = False
 
     @classmethod
@@ -94,6 +94,6 @@ class AgentConfig:
             session_max_count=int(os.getenv("ADAPTIVE_AGENT_SESSION_MAX_COUNT", "500")),
             ollama_port=int(os.getenv("OLLAMA_PORT", "11434")),
             ollama_timeout_seconds=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60")),
-            ollama_num_predict=int(os.getenv("OLLAMA_NUM_PREDICT", "4096")),
+            ollama_num_predict=int(os.getenv("OLLAMA_NUM_PREDICT", "6144")),
             ollama_think=os.getenv("OLLAMA_THINK", "false").strip().lower() in {"1", "true", "yes", "on"},
         )

@@ -34,6 +34,45 @@ QUALITY BAR
 - In every comprehension or generator expression, every name used in the result expression must be bound in the for-clause of the same comprehension. Example: write `[r["field"] for r in items]` not `[v for r in items]` where v is unbound.
 - The run() function must be fully self-contained: do not call any function that is not defined within the same code block.
 
+CODE SHAPE — the run() function must follow this exact structure.
+
+WRONG (three bugs in one — never do this):
+  result = [v for r in data if r['flag']]  # v not bound in for-clause
+  return compute(result)                    # compute() not defined here
+  run({'x': "[{'k':1}]"})                   # single-quote strings are not valid JSON
+
+RIGHT shape for a JSON tool:
+  import json
+
+  def run(arguments):
+      records = json.loads(arguments['<input_key>'])
+      filtered = [r for r in records if r.get('<flag>', False)]   # r is the loop var
+      total = sum(r['<value>'] for r in filtered)                  # r reused correctly
+      return {'count': len(filtered), 'total': total}
+
+  if __name__ == '__main__':
+      result = run({'<input_key>': '[{"<flag>": true, "<value>": 10}]'})  # double-quote JSON
+      print(result)
+
+RIGHT shape for a CSV tool:
+  import csv, io, json
+
+  def run(arguments):
+      reader = csv.DictReader(io.StringIO(arguments['csv_text']))
+      groups = {}
+      for row in reader:
+          key = row['<group_col>']
+          try:
+              val = float(row['<value_col>'])
+          except (ValueError, KeyError):
+              continue
+          groups.setdefault(key, []).append(val)
+      return {k: round(sum(v)/len(v), 2) for k, v in groups.items()}
+
+  if __name__ == '__main__':
+      sample = '<col1>,<col2>\nA,10\nB,20\nA,30'
+      print(run({'csv_text': sample}))
+
 OUTPUT
 - Return only raw JSON describing the generated tool, with no Markdown fences:
 {"code":"def run(arguments): ...","description":"<what the tool does>","parameters":{},"returns":{}}
