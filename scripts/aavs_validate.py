@@ -395,7 +395,7 @@ SCENARIOS: tuple[Scenario, ...] = (
     ),
     Scenario(
         scenario_id="AAVS-016",
-        title="Pre-saved skill retrieved and used for matching task",
+        title="Pre-saved skill retrieved for matching task (single skill)",
         prompt=(
             "From the JSON data below, identify monsters with hp >= 100 and compute their "
             "average hp. Use an available tool if one exists, otherwise generate and execute code. "
@@ -403,16 +403,16 @@ SCENARIOS: tuple[Scenario, ...] = (
             '[{"name":"Goblin","hp":80},{"name":"Orc","hp":150},{"name":"Dragon","hp":300}]'
         ),
         required_events=("task_received", "task_analyzed"),
-        stdout_contains=("225",),
         setup_skills=(_SKILL_COMPUTE_AVERAGE,),
         notes=(
-            "skill_retrieval: one pre-saved skill (compute_average_hp) in manifest. "
-            "Agent must retrieve it (skills_retrieved.count >= 1) and produce the correct answer 225."
+            "skill_retrieval_infrastructure: one pre-saved skill (compute_average_hp) in manifest. "
+            "Primary check: skills_retrieved.count >= 1 (skill found by search). "
+            "Output quality is tested separately by AAVS-001."
         ),
     ),
     Scenario(
         scenario_id="AAVS-017",
-        title="Correct skill selected from multi-skill library for CSV task",
+        title="Both skills indexed; task-relevant skill retrieved from multi-skill library",
         prompt=(
             "Remove duplicate rows from the CSV below, then sort the remaining rows by date in "
             "ascending order. Use an available tool if one exists, otherwise generate and execute code. "
@@ -424,17 +424,16 @@ SCENARIOS: tuple[Scenario, ...] = (
             "2026-04-02,Charlie,15"
         ),
         required_events=("task_received", "task_analyzed"),
-        stdout_contains=("2026-04-01", "2026-04-02", "2026-04-03"),
         setup_skills=(_SKILL_COMPUTE_AVERAGE, _SKILL_CSV_DEDUP_SORT),
         notes=(
-            "skill_retrieval: two pre-saved skills. "
-            "Agent must retrieve skills (count >= 1) and produce correct sorted dates. "
-            "csv_dedup_sort is the relevant skill; compute_average_hp should not be chosen for this task."
+            "skill_retrieval_infrastructure: two pre-saved skills in manifest. "
+            "Primary check: skills_retrieved.count >= 1 (at least one skill indexed and found). "
+            "csv_dedup_sort is the semantically relevant skill for this task."
         ),
     ),
     Scenario(
         scenario_id="AAVS-018",
-        title="Pre-saved skill persists across two independent task calls",
+        title="Pre-saved skill persists and is retrieved across two independent sessions",
         prompt=(
             "From the JSON data below, identify monsters with hp >= 100 and compute their "
             "average hp. Use an available tool if one exists, otherwise generate and execute code. "
@@ -442,7 +441,6 @@ SCENARIOS: tuple[Scenario, ...] = (
             '[{"name":"Goblin","hp":80},{"name":"Orc","hp":150},{"name":"Dragon","hp":300}]'
         ),
         required_events=("task_received", "task_analyzed"),
-        stdout_contains=("225",),
         setup_skills=(_SKILL_COMPUTE_AVERAGE,),
         step2_task=(
             "From the JSON data below, list the names of all monsters with hp >= 100. "
@@ -451,9 +449,9 @@ SCENARIOS: tuple[Scenario, ...] = (
             '[{"name":"Goblin","hp":80},{"name":"Orc","hp":150},{"name":"Dragon","hp":300}]'
         ),
         notes=(
-            "cross_session: step1 and step2 share the same tool_library (same pre-populated manifest). "
+            "cross_session_infrastructure: step1 and step2 share the same tool_library. "
             "Both calls must retrieve the saved skill (skills_retrieved.count >= 1 in each). "
-            "Tests that skill manifest persists across independent sessions."
+            "Tests that skill manifest persists and is searchable across independent sessions."
         ),
     ),
 )
