@@ -13,8 +13,11 @@ _DEFAULT_PORT = 11434
 
 
 def _base_url(host: str, port: int) -> str:
+    import urllib.parse
     host = host.rstrip("/")
     if host.startswith(("http://", "https://")):
+        if urllib.parse.urlparse(host).port is not None:
+            return host  # host already includes a port — don't append again
         return f"{host}:{port}"
     return f"http://{host}:{port}"
 

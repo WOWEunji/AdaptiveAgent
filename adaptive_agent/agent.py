@@ -345,7 +345,19 @@ class AdaptiveAgent:
             parsed = self._loads_plan_json(response)
         except json.JSONDecodeError:
             parsed = response
-        return self._normalize_critique(parsed, fallback_response=response)
+        critique = self._normalize_critique(parsed, fallback_response=response)
+        # If the tool succeeded AND the Critic has already issued at least one verdict on
+        # this execution, block a second retry to prevent infinite critique loops.
+        prior_critiques = sum(1 for e in state.events if e.name == "execution_critiqued")
+        if (
+            state.last_tool_result
+            and state.last_tool_result.get("success")
+            and prior_critiques >= 1
+            and critique.get("verdict") == "retry"
+        ):
+            critique["verdict"] = "success"
+            critique["next_node"] = "done"
+        return critique
 
     def _normalize_json_control_chars(self, text: str) -> str:
         """Normalize LLM-generated JSON with invalid escape sequences or bare control chars.
