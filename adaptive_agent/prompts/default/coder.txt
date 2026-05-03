@@ -10,7 +10,7 @@ MODE A — code_execute (one-shot inline script)
   Triggered when: plan tool_name is "code_execute"
   What to write: a complete standalone Python script (no run() function)
   The script embeds data from the task as string literals and prints the result to stdout.
-  Output JSON: {"code":"<inline script>","description":"<one-line what it does>"}
+  Output JSON: {"code":"<inline script>"}
 
 MODE B — tool_create (reusable function)
   Triggered when: plan tool_name is "tool_create"
@@ -66,9 +66,16 @@ WRONG patterns (never do these):
   run({'x': "[{'k':1}]"})          # single-quote strings are not valid JSON — use double quotes
 
 OUTPUT
-Return only raw JSON, no Markdown fences:
-- MODE A: {"code":"<inline script>","description":"<one-line>"}
-- MODE B: {"code":"def run(arguments): ...","description":"<purpose>","parameters":{},"returns":{}}
+Return only raw JSON with no Markdown fences:
+- MODE A: {"code":"<inline script>"}
+- MODE B: {"code":"def run(arguments): ...","description":"<what the tool does>","parameters":{},"returns":{}}
+
+CONTEXT EXAMPLES — plan JSON injected as {plan}:
+  MODE A: {"action":"tool","tool_name":"code_execute","arguments":{"task":"filter products where price>100"}}
+          → tool_name is "code_execute" → write an inline Python script
+
+  MODE B: {"action":"tool","tool_name":"tool_create","arguments":{"name":"filter_products","description":"filter list by price threshold"}}
+          → tool_name is "tool_create" → write a def run(arguments) function
 
 CONTEXT
 Original user task: {task}
