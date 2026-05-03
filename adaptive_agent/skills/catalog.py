@@ -104,6 +104,18 @@ class SkillCatalog:
         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return normalized
 
+    def delete(self, name: str) -> bool:
+        """Remove name from the manifest and persist. Returns True if removed, False if not found."""
+
+        data = self._load()
+        tools = data.get("tools", [])
+        before = len(tools)
+        data["tools"] = [t for t in tools if t.get("name") != name]
+        if len(data["tools"]) == before:
+            return False
+        self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+
     def record_usage(self, name: str, *, success: bool) -> dict[str, Any] | None:
         """Increment ``usage_count`` and (on failure) ``failure_count`` for ``name``.
 

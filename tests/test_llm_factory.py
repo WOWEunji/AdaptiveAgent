@@ -10,6 +10,10 @@ from unittest.mock import MagicMock, patch
 from adaptive_agent.config import AgentConfig
 from adaptive_agent.llms.factory import create_llm_client
 from adaptive_agent.llms.ollama import OllamaClient
+from adaptive_agent.llms.openrouter_client import (
+    OpenRouterClient,
+    validate_openrouter_api_key,
+)
 
 
 class LLMFactoryTest(unittest.TestCase):
@@ -38,14 +42,6 @@ class LLMFactoryTest(unittest.TestCase):
             create_llm_client(config, provider="openai")
 
         client_class.assert_called_once_with(model="gpt-5-nano")
-
-    def test_gemini_provider_uses_configured_model(self) -> None:
-        config = AgentConfig(gemini_model="gemini-2.5-flash-lite")
-
-        with patch("adaptive_agent.llms.gemini_client.GeminiClient") as client_class:
-            create_llm_client(config, provider="gemini")
-
-        client_class.assert_called_once_with(model="gemini-2.5-flash-lite")
 
     def test_ollama_client_calls_http_api(self) -> None:
         response_body = json.dumps({"message": {"content": "ok"}}).encode()
@@ -81,6 +77,61 @@ class LLMFactoryTest(unittest.TestCase):
     def test_ollama_client_custom_host_and_port(self) -> None:
         client = OllamaClient(model="m", host="0.0.0.0", port=9999)
         self.assertEqual(client._base, "http://0.0.0.0:9999")
+
+
+class OpenRouterClientTest(unittest.TestCase):
+    def test_factory_returns_openrouter_client(self) -> None:
+        config = AgentConfig(
+            openrouter_model="openai/gpt-4.1-nano",
+            openrouter_api_key="sk-or-v1-valid-key",
+        )
+        with patch("adaptive_agent.llms.openrouter_client.OpenRouterClient") as client_class:
+            create_llm_client(config, provider="openrouter")
+        client_class.assert_called_once_with(
+            model="openai/gpt-4.1-nano",
+            api_key="sk-or-v1-valid-key",
+        )
+
+    def test_validate_key_rejects_empty(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_openrouter_api_key("")
+
+    def test_validate_key_rejects_none(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_openrouter_api_key(None)
+
+    def test_validate_key_rejects_placeholder(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_openrouter_api_key("your_openrouter_key")
+
+    def test_validate_key_accepts_real_key(self) -> None:
+        key = validate_openrouter_api_key("sk-or-v1-abc123")
+        self.assertEqual(key, "sk-or-v1-abc123")
+
+    def test_complete_calls_openai_sdk_with_openrouter_base_url(self) -> None:
+        """complete()가 OpenAI SDK를 OpenRouter base URL로 호출하는지 검증한다."""
+        mock_message = MagicMock()
+        mock_message.content = "42"
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+
+        mock_openai_instance = MagicMock()
+        mock_openai_instance.chat.completions.create.return_value = mock_response
+
+        with patch(
+            "openai.OpenAI",
+            return_value=mock_openai_instance,
+        ) as mock_openai_cls:
+            client = OpenRouterClient(model="openai/gpt-4.1-nano", api_key="sk-or-v1-test")
+            result = client.complete("hello")
+
+        self.assertEqual(result, "42")
+        init_kwargs = mock_openai_cls.call_args.kwargs
+        self.assertIn("openrouter.ai", init_kwargs.get("base_url", ""))
+        call_kwargs = mock_openai_instance.chat.completions.create.call_args.kwargs
+        self.assertEqual(call_kwargs["model"], "openai/gpt-4.1-nano")
 
 
 if __name__ == "__main__":

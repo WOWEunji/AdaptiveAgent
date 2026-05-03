@@ -29,6 +29,11 @@ class ToolRegistry:
     def list(self) -> list[Tool]:
         return list(self._tools.values())
 
+    def unregister(self, name: str) -> bool:
+        """Remove a tool by name. Returns True if removed, False if not found."""
+
+        return self._tools.pop(name, None) is not None
+
 
 def create_default_registry(
     workspace_dir: Path | None = None,
@@ -205,16 +210,6 @@ def create_default_registry(
     )
     registry.register(
         Tool(
-            name="test_run",
-            description="프로젝트 테스트 명령을 워크스페이스 복사본에서 실행하고 결과/기대값 판정을 반환합니다.",
-            handler=lambda arguments: builtins.test_run(arguments, sandbox=sandbox),
-            category="execution",
-            safety_level="high",
-            usage='python3 -m adaptive_agent --json --tool test_run --arg command="python3 -m unittest discover"',
-        )
-    )
-    registry.register(
-        Tool(
             name="tool_create",
             description="새 Python 도구 코드를 툴 라이브러리에 저장합니다.",
             handler=lambda arguments: builtins.tool_create(arguments, tool_library=tool_library),
@@ -303,22 +298,34 @@ def create_default_registry(
     )
     registry.register(
         Tool(
-            name="web_fetch",
-            description="HTTP/HTTPS URL을 가져와 status_code와 body를 반환합니다. http/https만 허용, 응답 크기 1MB 제한.",
-            handler=builtins.web_fetch,
-            category="network",
-            safety_level="medium",
-            usage='python3 -m adaptive_agent --json --tool web_fetch --arg url=https://example.com',
-        )
-    )
-    registry.register(
-        Tool(
             name="suggest_builtin_tools",
             description="현재 목록 외에 추가로 유용한 내장 도구 후보와 이유를 반환합니다.",
             handler=builtins.suggested_builtin_tools,
             category="planning",
             safety_level="low",
             usage="python3 -m adaptive_agent --tool suggest_builtin_tools",
+        )
+    )
+    registry.register(
+        Tool(
+            name="skill_list",
+            description="저장된 스킬 목록과 메타데이터를 반환합니다.",
+            handler=lambda arguments: builtins.skill_list(arguments, tool_library=tool_library),
+            category="meta",
+            safety_level="low",
+            usage='adaptive-agent "저장된 스킬 목록 보여줘"',
+        )
+    )
+    registry.register(
+        Tool(
+            name="skill_delete",
+            description="이름으로 스킬을 삭제합니다. manifest와 파일을 모두 제거합니다.",
+            handler=lambda arguments: builtins.skill_delete(
+                arguments, tool_library=tool_library, registry=registry
+            ),
+            category="meta",
+            safety_level="high",
+            usage='adaptive-agent "compute_stats 스킬 삭제해줘"',
         )
     )
     registry.generated_load_results = load_generated_tools(registry, tool_library=tool_library, sandbox=sandbox)
@@ -343,7 +350,7 @@ def load_generated_tools(
         if registry.get(name) is not None:
             load_results.append({"name": name, "loaded": False, "reason": "duplicate_tool_name"})
             continue
-        if metadata.get("validation_status") != "passed" or metadata.get("approval_status") != "approved":
+        if metadata.get("validation_status") not in {"passed", "structure_only"} or metadata.get("approval_status") != "approved":
             load_results.append({"name": name, "loaded": False, "reason": "not_approved_or_validated"})
             continue
         code_path = _resolve_generated_tool_path(tool_library, metadata)

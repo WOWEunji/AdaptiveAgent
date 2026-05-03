@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from adaptive_agent.agents.executor import ExecutorAgent, ExecutorDependencies
 from adaptive_agent.config import AgentConfig
+from adaptive_agent.conversation import ConversationSession, PendingSave
 from adaptive_agent.llms.base import LLMClient
-from adaptive_agent.llms.factory import create_embedding_fn, create_llm_client
+from adaptive_agent.llms.factory import create_coder_llm_client, create_embedding_fn, create_llm_client
 from adaptive_agent.prompts import PromptLoader
 from adaptive_agent.response import AgentResponse
 from adaptive_agent.router import RouterDependencies, StateMachineRouter
-from adaptive_agent.sessions import SessionStore
 from adaptive_agent.skills import SkillCatalog
 from adaptive_agent.state import AgentState, ToolSchema
 from adaptive_agent.tools.executor import ToolExecutor
 from adaptive_agent.tools.registry import ToolRegistry, create_default_registry
+
+if TYPE_CHECKING:
+    from adaptive_agent.logging import AgentLogger
 
 
 _VALID_PLAN_ACTIONS = {"tool", "respond"}
@@ -44,9 +47,11 @@ class AdaptiveAgent:
         registry: ToolRegistry | None = None,
         executor: ToolExecutor | None = None,
         prompt_loader: PromptLoader | None = None,
+        logger: AgentLogger | None = None,
     ) -> None:
         self.config = config or AgentConfig.from_env()
         self.llm_client = llm_client or create_llm_client(self.config)
+        self.coder_llm_client: LLMClient = create_coder_llm_client(self.config) or self.llm_client
         self.registry = registry or create_default_registry(
             self.config.workspace_dir,
             tool_library_dir=self.config.tool_library_dir,
@@ -54,21 +59,18 @@ class AdaptiveAgent:
         )
         self.executor = executor or ToolExecutor(self.registry)
         self.prompt_loader = prompt_loader or PromptLoader()
-        self.session_store = SessionStore(self.config.session_dir)
-        self.session_store.cleanup(
-            ttl_hours=self.config.session_ttl_hours,
-            max_count=self.config.session_max_count,
-        )
         self.skill_catalog = SkillCatalog(
             self.config.tool_library_dir,
             embedding_fn=create_embedding_fn(self.config),
         )
+        self.current_session: ConversationSession | None = None
         _executor_agent = ExecutorAgent(
             ExecutorDependencies(
                 run_tool=self.run_tool,
                 handle_success=self._handle_successful_tool_result,
                 plan_correction=self._plan_correction_with_llm,
                 max_self_corrections=self.config.max_self_corrections,
+                logger=logger,
             )
         )
         self.router = StateMachineRouter(
@@ -79,9 +81,12 @@ class AdaptiveAgent:
                 critique_execution=self._critique_execution_with_llm,
                 retrieve_skills=self._retrieve_skills,
                 code_with_llm=self._code_with_llm,
+                synthesize_result=self._synthesize_result,
+                synthesize_code_save=self._synthesize_code_save,
                 skill_catalog=self.skill_catalog,
                 make_response=AgentResponse,
                 max_steps=self.config.max_router_steps,
+                logger=logger,
             )
         )
 
@@ -93,6 +98,149 @@ class AdaptiveAgent:
     def run(self, task: str) -> AgentResponse:
         """Run one preserved user task through the state-machine router."""
         return self.router.run(task)
+
+    def run_turn(self, task: str, session: ConversationSession) -> AgentResponse:
+        """Run one turn within a multi-turn conversation session."""
+        self.current_session = session
+        try:
+            if session.pending_action:
+                return self._handle_pending_action(task, session)
+            return self._run_turn_normal(task, session)
+        finally:
+            self.current_session = None
+
+    def _run_turn_normal(self, task: str, session: ConversationSession) -> AgentResponse:
+        """Execute the state-machine router for a fresh turn."""
+        from adaptive_agent.state import Message  # noqa: F401 — used via state
+        state = self._create_state()
+        state.history = list(session.history)
+        state.user_task = task
+        state.next_node = "retrieve"
+        state.record_event("task_received", task=task)
+        state.append_message("user", task)
+        response = self.router.run_state(state)
+        self._update_session_after_turn(session, state, response)
+        return response
+
+    def _handle_pending_action(self, user_input: str, session: ConversationSession) -> AgentResponse:
+        """Resolve a pending approval/confirmation with the user's answer."""
+        from adaptive_agent.state import Message
+
+        action = session.pending_action
+        session.pending_action = None
+
+        session.history.append(Message(role="user", content=user_input))
+        import re as _re
+        _YES = _re.compile(r'\b(yes|y|ok|승인|저장)\b|^(네|예)$', _re.IGNORECASE)
+        is_yes = bool(_YES.search(user_input.strip()))
+
+        if action.get("type") == "code_save":
+            if is_yes:
+                self.save_code(action["name"], action["description"], action["code"])
+                msg = f"'{action['name']}' 스킬이 저장되었습니다."
+            else:
+                msg = "저장을 취소했습니다."
+            session.history.append(Message(role="assistant", content=msg))
+            return AgentResponse(task=action.get("task", ""), output=msg, action="tool", summary=msg)
+
+        if action.get("type") == "tool_approve":
+            if is_yes:
+                result = self.run_tool("tool_approve", {"name": action["name"]})
+                msg = (
+                    f"'{action['name']}' 스킬이 저장되었습니다."
+                    if result.success
+                    else f"저장 실패: {result.error}"
+                )
+            else:
+                msg = "승인을 취소했습니다."
+            session.history.append(Message(role="assistant", content=msg))
+            return AgentResponse(task=action.get("task", ""), output=msg, action="tool", summary=msg)
+
+        # 알 수 없는 pending_action — 일반 턴으로 처리
+        return self._run_turn_normal(user_input, session)
+
+    def _update_session_after_turn(
+        self,
+        session: ConversationSession,
+        state: AgentState,
+        response: AgentResponse,
+    ) -> None:
+        """Append new messages from this turn to the session history."""
+        from adaptive_agent.state import Message
+        prior_len = len(session.history)
+        for msg in state.history[prior_len:]:
+            session.history.append(msg)
+        # ask_human pending: 질문과 상태를 history에 기록해 다음 턴에서 이미 확인했음을 알 수 있게 함
+        if isinstance(response.output, dict) and response.output.get("status") == "pending_human_input":
+            questions = response.output.get("questions") or []
+            q_text = questions[0] if questions else "확인 요청"
+            session.history.append(Message(role="assistant", content=f"[확인 요청] {str(q_text)[:200]}"))
+        else:
+            summary = response.summary or ""
+            if not summary and isinstance(response.output, str) and response.output.strip():
+                # respond 액션: LLM이 텍스트로 답한 경우 — history에 기록해야 다음 턴이 맥락을 봄
+                summary = response.output.strip()[:400]
+            if not summary and isinstance(response.output, dict):
+                execution = (response.output.get("execution") or {})
+                summary = str(execution.get("stdout", ""))[:200].strip()
+            if summary:
+                session.history.append(Message(role="assistant", content=summary))
+
+    def save_session_codes(
+        self,
+        session: ConversationSession,
+        approve_fn: "Callable[[PendingSave], bool]",
+    ) -> None:
+        """Process pending saves collected during the session.
+
+        approve_fn: called for each PendingSave; returns True to save, False to skip.
+        """
+        import hashlib
+        import re as _re
+
+        _SAFE_NAME = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]{1,63}$")
+
+        for item in session.pending_saves:
+            if not approve_fn(item):
+                continue
+            code = item.code or ""
+            if not code.strip():
+                continue
+            try:
+                import ast as _ast
+                tree = _ast.parse(code)
+                already_wrapped = any(
+                    isinstance(n, _ast.FunctionDef) and n.name == "run"
+                    for n in _ast.walk(tree)
+                )
+            except SyntaxError:
+                already_wrapped = False
+
+            wrapped = code if already_wrapped else (
+                "def run(arguments):\n"
+                + "\n".join(f"    {ln}" for ln in code.splitlines())
+                + "\n"
+            )
+
+            name = item.suggested_name
+            if not _SAFE_NAME.match(name):
+                name = _re.sub(r"[^A-Za-z0-9_]", "_", name)[:40].lstrip("0123456789_") or f"tool_{item.turn_session_id[:8]}"
+
+            self.config.tool_library_dir.mkdir(parents=True, exist_ok=True)
+            py_path = self.config.tool_library_dir / f"{name}.py"
+            py_path.write_text(wrapped, encoding="utf-8")
+            file_hash = hashlib.sha256(wrapped.encode()).hexdigest()
+            self.skill_catalog.upsert({
+                "name": name,
+                "description": item.suggested_desc,
+                "file_path": str(py_path),
+                "file_hash": file_hash,
+                "validation_status": "executed",
+                "approval_status": "approved",
+                "approved": True,
+                "category": "generated",
+                "tags": [],
+            })
 
     def run_tool(self, tool_name: str, arguments: dict[str, Any], *, _state: AgentState | None = None):
         """Execute an explicitly named tool without natural-language planning.
@@ -130,46 +278,6 @@ class AdaptiveAgent:
                 failure_count=updated.get("failure_count"),
             )
 
-    def resume(self, session_id: str, *, user_input: str | None = None, approve: bool = False, reject: bool = False) -> AgentResponse:
-        """Resume a pending HITL session with explicit user input or decision."""
-
-        snapshot = self.session_store.load_pending(session_id)
-        if reject:
-            self.session_store.close(session_id, "rejected")
-            return AgentResponse(
-                task=str(snapshot.get("user_task") or ""),
-                output="세션 요청을 거부했습니다.",
-                action="rejected",
-                session_id=session_id,
-            )
-        state = self._create_state()
-        state.session_id = session_id
-        state.user_task = str(snapshot.get("user_task") or "")
-        state.current_plan = snapshot.get("current_plan") if isinstance(snapshot.get("current_plan"), dict) else {}
-        state.last_tool_name = str(snapshot.get("last_tool_name") or "") or None
-        state.last_tool_arguments = (
-            snapshot.get("last_tool_arguments") if isinstance(snapshot.get("last_tool_arguments"), dict) else {}
-        )
-        state.last_tool_result = (
-            snapshot.get("last_tool_result") if isinstance(snapshot.get("last_tool_result"), dict) else None
-        )
-        state.reflections = snapshot.get("reflections") if isinstance(snapshot.get("reflections"), list) else []
-        if approve and isinstance(snapshot.get("resume_plan"), dict) and snapshot["resume_plan"].get("action") == "tool":
-            state.current_plan = dict(snapshot["resume_plan"])
-            state.next_node = "execute"
-        else:
-            resumed_text = user_input if user_input is not None else ("approved" if approve else "")
-            if resumed_text:
-                state.append_message("user", resumed_text)
-                state.user_task = f"{state.user_task}\n\nAdditional user input: {resumed_text}"
-            state.next_node = "retrieve"
-        state.record_event("session_resumed", session_id=session_id, approved=approve, has_input=user_input is not None)
-        response = self.router.run_state(state)
-        approval_resume = approve and isinstance(snapshot.get("resume_plan"), dict) and snapshot["resume_plan"].get("action") == "tool"
-        if self._resume_completed_successfully(response) and (not approval_resume or response.action == "tool"):
-            self.session_store.close(session_id, "completed")
-        return response
-
     def _handle_successful_tool_result(
         self,
         task: str,
@@ -200,69 +308,45 @@ class AdaptiveAgent:
             generated_name = ""
             if isinstance(generated_tool, dict):
                 generated_name = str(generated_tool.get("name") or "")
-            approval_output = {
-                "status": "approval_required",
-                "plan": {"action": "approve_tool", "name": generated_name},
-                "risk_level": "high",
-                "approved": False,
+            state.current_plan = {
+                "action": "tool",
+                "tool_name": "tool_approve",
+                "arguments": {"name": generated_name},
             }
-            state.next_node = "approve"
-            pending = self._save_pending_session(
-                state,
-                approval_output,
-                resume_plan={"action": "tool", "tool_name": "tool_approve", "arguments": {"name": generated_name}},
-            )
-            state.record_event("generated_tool_validation_pending_approval", tool_name=generated_name)
-            state.record_event("final_response_created", action="approval_required")
+            state.next_node = "execute"
+            state.record_event("generated_tool_validation_auto_approve", tool_name=generated_name)
+            return None
+        if tool_name == "tool_approve" and isinstance(output, dict):
+            tool_meta = output.get("tool") or {}
+            approved_name = str(tool_meta.get("name") or output.get("name") or "")
+            msg = f"'{approved_name}' 스킬이 라이브러리에 저장되었습니다." if approved_name else "스킬이 저장되었습니다."
+            state.next_node = "done"
+            state.summary = msg
+            state.record_event("final_response_created", action="tool")
             return AgentResponse(
                 task=task,
-                output=approval_output,
+                output=msg,
                 tool_name=tool_name,
-                action="approval_required",
+                action="tool",
                 events=state.events,
-                session_id=state.session_id,
-                pending=pending,
+                summary=msg,
             )
         if tool_name in {"ask_human", "propose_actions"}:
+            questions = (output or {}).get("questions") or [] if isinstance(output, dict) else []
+            prompt = (questions[0] if questions else "추가 정보를 입력해 주세요.")[:200]
             state.next_node = "approve"
-            pending = self._save_pending_session(state, output)
-            state.record_event("final_response_created", action="tool")
+            state.record_event("final_response_created", action="ask_human")
             return AgentResponse(
                 task=task,
                 output=output,
                 tool_name=tool_name,
-                action="tool",
+                action="ask_human",
                 events=state.events,
-                session_id=state.session_id,
-                pending=pending,
+                needs_input=True,
+                input_prompt=prompt,
             )
         state.next_node = "critique"
         return None
-
-    def _resume_completed_successfully(self, response: AgentResponse) -> bool:
-        action = str(getattr(response, "action", ""))
-        pending = getattr(response, "pending", None)
-        if isinstance(pending, dict) and pending.get("status") == "pending":
-            return False
-        return action not in {"approval_required", "tool_error", "llm_error", "router_error", "critic_error", "error"}
-
-    def _save_pending_session(
-        self,
-        state: AgentState,
-        output: Any,
-        *,
-        resume_plan: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        pending = self.session_store.save_pending(state, output, resume_plan=resume_plan)
-        state.pending = pending
-        state.session_status = "pending"
-        state.record_event(
-            "session_pending_saved",
-            session_id=state.session_id,
-            pending_type=pending.get("pending_type"),
-            cleanup_hint=f"rm {self.config.session_dir / (state.session_id + '.json')}",
-        )
-        return pending
 
     def _plan_with_llm(self, task: str) -> dict[str, Any]:
         """Create a normalized plan from the LLM response."""
@@ -290,12 +374,20 @@ class AdaptiveAgent:
         if not result.success or not isinstance(result.output, dict):
             return []
         matches = result.output.get("matches")
-        return matches if isinstance(matches, list) else []
+        if not isinstance(matches, list):
+            return []
+        # registry에 로드 실패한 스킬은 제외 — catalog에만 있고 실행 불가한 스킬을 플래너가 선택하면 "Unknown tool" 오류 발생
+        failed_names = {
+            str(r.get("name"))
+            for r in self.registry.generated_load_results
+            if not r.get("loaded")
+        }
+        return [m for m in matches if str(m.get("name", "")) not in failed_names]
 
     def _code_with_llm(self, state: AgentState) -> dict[str, Any]:
         """Create generated-tool code from the Coder Agent prompt."""
 
-        response = self.llm_client.complete(
+        response = self.coder_llm_client.complete(
             self.prompt_loader.render(
                 "coder.txt",
                 plan=json.dumps(state.current_plan, ensure_ascii=False, default=str),
@@ -318,6 +410,104 @@ class AdaptiveAgent:
         if not isinstance(parsed, dict):
             return {"code": str(response)}
         return parsed
+
+    def _synthesize_result(self, state: AgentState) -> str:
+        """Generate a natural language answer from the tool execution result."""
+        tool_result = state.last_tool_result or {}
+        raw_output = tool_result.get("output")
+        if isinstance(raw_output, dict):
+            execution = raw_output.get("execution") or {}
+            stdout = execution.get("stdout", "") if isinstance(execution, dict) else ""
+        elif isinstance(raw_output, str):
+            # 파일 목록·텍스트 결과 등 직접 string 반환 툴 — stdout으로 올려서 LLM이 볼 수 있게 함
+            stdout = raw_output
+        else:
+            stdout = ""
+
+        try:
+            tool_result_preview = json.dumps(raw_output, ensure_ascii=False, default=str)[:1500]
+        except Exception:
+            tool_result_preview = str(raw_output)[:1500]
+
+        return self.llm_client.complete(
+            self.prompt_loader.render(
+                "synthesize.txt",
+                task=state.user_task,
+                tool_name=state.last_tool_name or "",
+                stdout=stdout.strip(),
+                tool_result=tool_result_preview,
+                generated_code=(state.generated_code or "").strip(),
+                language=self.config.language,
+            )
+        )
+
+    def _suggest_skill_name(self, task: str, code: str) -> str:
+        """LLM에게 스킬 이름 제안을 요청한다. 실패 시 정규식으로 폴백."""
+        import re as _re
+        _SAFE = _re.compile(r'^[a-z][a-z0-9_]{1,39}$')
+        prompt = (
+            "Generate a concise Python snake_case function name (2-4 words, max 30 chars, lowercase) "
+            "that describes this task. Output ONLY the name, nothing else.\n\n"
+            f"Task: {task[:200]}\n"
+            f"Code summary: {code.splitlines()[0][:100] if code else ''}"
+        )
+        try:
+            raw = self.llm_client.complete(prompt).strip().split()[0].lower()
+            raw = _re.sub(r'[^a-z0-9_]', '_', raw)[:40].strip('_')
+            if _SAFE.match(raw):
+                return raw
+        except Exception:
+            pass
+        # 폴백: 기존 정규식 로직
+        first = task.split('\n')[0][:40]
+        words = _re.sub(r'[^A-Za-z0-9\s]', '', first).split()
+        raw = '_'.join(w.lower() for w in words[:3])[:30] if words else ""
+        if raw and _SAFE.match(raw):
+            return raw
+        return f"tool_{__import__('uuid').uuid4().hex[:8]}"
+
+    def _synthesize_code_save(self, state: AgentState) -> AgentResponse:
+        """code_execute 성공 후 완료 응답을 반환한다. 저장 여부는 LLM 응답에 포함."""
+        state.record_event("final_response_created", action="tool")
+        return AgentResponse(
+            task=state.user_task,
+            output=(state.last_tool_result or {}).get("output"),
+            tool_name="code_execute",
+            action="tool",
+            events=state.events,
+            summary=state.summary,
+        )
+
+    def save_code(self, name: str, description: str, code: str) -> None:
+        """검증 없이 code를 스킬로 직접 저장한다. approval_required 응답 처리 후 호출."""
+        import hashlib, re as _re
+        _SAFE_NAME = _re.compile(r'^[A-Za-z_][A-Za-z0-9_]{1,63}$')
+        if not _SAFE_NAME.match(name):
+            name = _re.sub(r'[^A-Za-z0-9_]', '_', name)[:40].lstrip('0123456789_') or f"tool_{__import__('uuid').uuid4().hex[:8]}"
+
+        already_wrapped = False
+        try:
+            import ast as _ast
+            already_wrapped = any(
+                isinstance(n, _ast.FunctionDef) and n.name == "run"
+                for n in _ast.walk(_ast.parse(code))
+            )
+        except SyntaxError:
+            pass
+
+        wrapped = code if already_wrapped else (
+            "def run(arguments):\n" + "\n".join(f"    {ln}" for ln in code.splitlines()) + "\n"
+        )
+        self.config.tool_library_dir.mkdir(parents=True, exist_ok=True)
+        py_path = self.config.tool_library_dir / f"{name}.py"
+        py_path.write_text(wrapped, encoding="utf-8")
+        file_hash = hashlib.sha256(wrapped.encode()).hexdigest()
+        self.skill_catalog.upsert({
+            "name": name, "description": description,
+            "file_path": str(py_path), "file_hash": file_hash,
+            "validation_status": "executed", "approval_status": "approved",
+            "approved": True, "category": "generated", "tags": [],
+        })
 
     def _plan_correction_with_llm(
         self,
@@ -355,7 +545,7 @@ class AdaptiveAgent:
         # If the tool succeeded, always block retry regardless of how many critiques have run.
         # The prior_critiques >= 1 guard only caught second-and-later critiques; the first
         # critique on a successful execution could still issue retry and trigger an extra
-        # plan→execute→critique cycle (observed in AAVS-009, AAVS-013).
+        # plan→execute→critique cycle.
         if (
             state.last_tool_result
             and state.last_tool_result.get("success")
@@ -566,8 +756,6 @@ class AdaptiveAgent:
         """Normalize model output to the executable agent plan contract."""
 
         if not isinstance(parsed, dict):
-            if isinstance(parsed, str) and self._looks_like_clarification_response(parsed):
-                return self._ask_human_plan(parsed)
             return {
                 "action": "respond",
                 "response": fallback_response,
@@ -636,8 +824,6 @@ class AdaptiveAgent:
                     return self._normalize_plan(embedded_plan, fallback_response=fallback_response)
             if bool(parsed.get("needs_user_input")):
                 return self._ask_human_plan(response)
-            if self._looks_like_clarification_response(response):
-                return self._ask_human_plan(response)
             return {
                 "action": "respond",
                 "response": response,
@@ -672,7 +858,10 @@ class AdaptiveAgent:
                     "_validation_error": "invalid_tool_arguments",
                 }
         arguments = self._normalize_tool_arguments(tool_name, arguments, parsed)
-        return {"action": "tool", "tool_name": tool_name, "arguments": arguments}
+        plan: dict[str, Any] = {"action": "tool", "tool_name": tool_name, "arguments": arguments}
+        if reasoning := parsed.get("reasoning"):
+            plan["reasoning"] = str(reasoning)
+        return plan
 
     def _normalize_critique(self, parsed: object, *, fallback_response: str) -> dict[str, Any]:
         """Normalize critic output to verdict, reason, reflection, and next_node."""
@@ -801,28 +990,6 @@ class AdaptiveAgent:
             token in normalized for token in ("ask", "clarif", "input")
         )
 
-    def _looks_like_clarification_response(self, response: str) -> bool:
-        """Detect direct clarification text that should route to HITL."""
-
-        normalized = response.casefold()
-        clarification_markers = (
-            "please provide",
-            "provide more",
-            "provide more details",
-            "more details",
-            "more detail",
-            "need access",
-            "need credentials",
-            "missing",
-            "which data",
-            "what data",
-            "clarify",
-            "추가 정보",
-            "알려주세요",
-            "제공",
-        )
-        return any(marker in normalized for marker in clarification_markers)
-
     def _clarification_text(self, parsed: dict[str, Any], fallback_response: str) -> str:
         response = parsed.get("response")
         if isinstance(response, str):
@@ -851,6 +1018,18 @@ class AdaptiveAgent:
             {"name": tool.name, "description": tool.description}
             for tool in self.registry.list()
         ]
+        # Build conversation history snippet from the most recent turns (up to 10 messages)
+        history_text = ""
+        if state and state.history:
+            recent = state.history[-10:] if len(state.history) > 10 else state.history
+            lines = [
+                f"{m.role}: {m.content[:600]}"
+                for m in recent
+                if m.role in ("user", "assistant")
+            ]
+            if lines:
+                history_text = "Recent conversation:\n" + "\n".join(lines) + "\n---\n"
+
         return self.prompt_loader.render(
             "plan.txt",
             available_tools=json.dumps(tools, ensure_ascii=False),
@@ -858,6 +1037,7 @@ class AdaptiveAgent:
             retrieved_skills=json.dumps(state.retrieved_skills if state else [], ensure_ascii=False, default=str),
             reflections=json.dumps(state.reflections if state else [], ensure_ascii=False, default=str),
             last_tool_result=json.dumps(state.last_tool_result if state else None, ensure_ascii=False, default=str),
+            conversation_history=history_text,
         )
 
     def _build_correction_prompt(

@@ -29,12 +29,31 @@ def create_llm_client(config: AgentConfig, provider: str | None = None) -> LLMCl
         from adaptive_agent.llms.openai_client import OpenAIClient
 
         return OpenAIClient(model=config.openai_model)
-    if selected_provider in ("gemini", "google"):
-        from adaptive_agent.llms.gemini_client import GeminiClient
+    if selected_provider == "openrouter":
+        from adaptive_agent.llms.openrouter_client import OpenRouterClient
 
-        return GeminiClient(model=config.gemini_model)
-
+        return OpenRouterClient(model=config.openrouter_model, api_key=config.openrouter_api_key or None)
     raise ValueError(f"Unsupported LLM provider: {selected_provider}")
+
+
+def create_coder_llm_client(config: AgentConfig) -> "LLMClient | None":
+    """Create a dedicated LLM client for the Coder Agent, or None if not configured.
+
+    Returns None when ``config.coder_provider`` is empty, which signals the
+    caller to fall back to the default ``llm_client``.
+    """
+    if not config.coder_provider:
+        return None
+    from dataclasses import replace as _replace
+    provider = config.coder_provider
+    model = config.coder_model
+    patched = _replace(
+        config,
+        openai_model=model if provider == "openai" and model else config.openai_model,
+        ollama_model=model if provider == "ollama" and model else config.ollama_model,
+        openrouter_model=model if provider == "openrouter" and model else config.openrouter_model,
+    )
+    return create_llm_client(patched, provider=provider)
 
 
 def create_embedding_fn(config: AgentConfig) -> Callable[[str], list[float]] | None:

@@ -29,6 +29,7 @@ class ExecutorDependencies:
     """AdaptiveAgent._plan_correction_with_llm(task, failed_plan, error=..., output=...)"""
 
     max_self_corrections: int
+    logger: "Any | None" = None
 
 
 class ExecutorAgent(BaseRoleAgent):
@@ -140,7 +141,6 @@ class ExecutorAgent(BaseRoleAgent):
             output=results,
             action="parallel",
             events=state.events,
-            session_id=state.session_id,
         )
 
     def _execute_normalized_tool(
@@ -208,7 +208,7 @@ class ExecutorAgent(BaseRoleAgent):
         task: str,
         last_outcome: _ToolAttemptOutcome,
         state: AgentState,
-    ) -> AgentResponse:
+    ) -> "AgentResponse | None":
         """Replan and re-execute up to ``max_self_corrections`` times.
 
         Returns either a final ``tool_error`` response (loop exhausted or
@@ -227,6 +227,8 @@ class ExecutorAgent(BaseRoleAgent):
                 tool_name=tool_name,
                 error=current_error,
             )
+            if self._deps.logger:
+                self._deps.logger.on_self_correction(attempt, current_error or "", tool_name)
             try:
                 corrected_plan = self._deps.plan_correction(
                     task,
@@ -264,12 +266,25 @@ class ExecutorAgent(BaseRoleAgent):
             )
             if outcome.success:
                 state.error_log = ""
-                return outcome.response  # type: ignore[return-value]
+                return outcome.response
 
             current_plan = outcome.last_plan
             current_error = outcome.last_error
             current_output = outcome.last_output
             tool_name = outcome.tool_name
+
+        # 저장된(retrieved) 스킬이 실패한 경우 한 번만 재계획 기회를 준다.
+        # 내장 툴(tool_approve 등) 실패나 이미 재계획한 경우는 에러로 종료한다.
+        state.error_log = current_error or "tool_execution_failed"
+        retrieved_names = {
+            s.get("name") if isinstance(s, dict) else str(s)
+            for s in (state.retrieved_skills or [])
+        }
+        if tool_name in retrieved_names and state.failure_count < 2:
+            state.failure_count += 1
+            state.record_event("failure_classified", reason="retrieved_skill_failed_replanning")
+            state.next_node = "plan"
+            return None
 
         state.record_event("final_response_created", action="tool_error")
         state.next_node = "error"
@@ -279,7 +294,6 @@ class ExecutorAgent(BaseRoleAgent):
             tool_name=tool_name,
             action="tool_error",
             events=state.events,
-            session_id=state.session_id,
         )
 
     # ------------------------------------------------------------------

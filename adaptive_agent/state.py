@@ -5,11 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
-from uuid import uuid4
 
 
 MessageRole = Literal["system", "user", "assistant", "tool"]
-NodeName = Literal["retrieve", "plan", "code", "execute", "critique", "approve", "store", "done", "error"]
+NodeName = Literal["retrieve", "plan", "code", "execute", "critique", "synthesize", "approve", "store", "done", "error"]
 
 
 @dataclass(frozen=True)
@@ -49,7 +48,6 @@ class AgentEvent:
 class AgentState:
     """Shared state for one AdaptiveAgent execution session."""
 
-    session_id: str = field(default_factory=lambda: uuid4().hex)
     user_task: str = ""
     history: list[Message] = field(default_factory=list)
     events: list[AgentEvent] = field(default_factory=list)
@@ -66,8 +64,6 @@ class AgentState:
     reflections: list[str] = field(default_factory=list)
     next_node: NodeName = "plan"
     approval: dict[str, Any] = field(default_factory=dict)
-    pending: dict[str, Any] = field(default_factory=dict)
-    session_status: str = "running"
     failure_count: int = 0
     summary: str = ""
     parallel_results: list[dict[str, Any]] = field(default_factory=list)

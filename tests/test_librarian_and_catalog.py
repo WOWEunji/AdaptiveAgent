@@ -34,7 +34,6 @@ def _seed_manifest_tool(workspace: Path, *, name: str, code: str) -> dict[str, o
         config=AgentConfig(
             workspace_dir=workspace,
             tool_library_dir=workspace / ".adaptive_agent" / "tools",
-            session_dir=workspace / ".adaptive_agent" / "sessions",
         ),
         llm_client=_SilentLLM(),
     )
@@ -106,6 +105,21 @@ class SkillCatalogRecordUsageTest(unittest.TestCase):
         self.assertEqual(updated["usage_count"], 2)
         self.assertEqual(updated["failure_count"], 1)
         self.assertEqual(updated["description"], "updated description")
+
+    def test_delete_removes_existing_entry(self) -> None:
+        self.assertTrue(self.catalog.delete("counter_tool"))
+        self.assertEqual(self.catalog.list(), [])
+
+    def test_delete_returns_false_for_missing_name(self) -> None:
+        self.assertFalse(self.catalog.delete("nonexistent"))
+
+    def test_delete_persists_removal_to_disk(self) -> None:
+        self.catalog.delete("counter_tool")
+
+        manifest_path = self.workspace / ".adaptive_agent" / "tools" / MANIFEST_FILENAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        names = [t["name"] for t in manifest["tools"]]
+        self.assertNotIn("counter_tool", names)
 
 
 class SkillCatalogFindStaleEntriesTest(unittest.TestCase):
@@ -255,7 +269,6 @@ class GeneratedToolUsageReportingTest(unittest.TestCase):
                 config=AgentConfig(
                     workspace_dir=workspace,
                     tool_library_dir=workspace / ".adaptive_agent" / "tools",
-                    session_dir=workspace / ".adaptive_agent" / "sessions",
                     max_self_corrections=0,
                 ),
                 llm_client=_ScriptedLLM(),
@@ -276,7 +289,6 @@ class GeneratedToolUsageReportingTest(unittest.TestCase):
                 config=AgentConfig(
                     workspace_dir=workspace,
                     tool_library_dir=workspace / ".adaptive_agent" / "tools",
-                    session_dir=workspace / ".adaptive_agent" / "sessions",
                 ),
                 llm_client=_SilentLLM(),
             )

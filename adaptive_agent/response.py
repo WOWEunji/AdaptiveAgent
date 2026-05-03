@@ -17,8 +17,9 @@ class AgentResponse:
     tool_name: str | None = None
     action: str = "respond"
     events: list[AgentEvent] = field(default_factory=list)
-    session_id: str | None = None
-    pending: dict[str, Any] | None = None
+    summary: str = ""
+    needs_input: bool = False
+    input_prompt: str = ""
 
 
 @dataclass(frozen=True)

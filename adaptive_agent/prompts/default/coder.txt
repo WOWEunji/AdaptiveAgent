@@ -15,7 +15,8 @@ MODE A — code_execute (one-shot inline script)
 MODE B — tool_create (reusable function)
   Triggered when: plan tool_name is "tool_create"
   What to write: a reusable def run(arguments) function
-  Output JSON: {"code":"def run(arguments): ...","description":"<purpose>","parameters":{},"returns":{},"sample_arguments":{"<input_key>":"<valid JSON string example>"}}
+  Output JSON: {"code":"def run(arguments): ...","description":"<purpose>","parameters":{"<input_key>":{"type":"string","description":"<what this argument is>"}},"returns":{"type":"object"},"sample_arguments":{"<input_key>":"<valid JSON string example>"}}
+  IMPORTANT: parameters must list every key that run(arguments) reads. NEVER leave parameters as {}.
 
 SHARED RULES
 - NEVER use open(), file I/O, or filesystem reads. Accept all input data through the task text or arguments only.
@@ -71,7 +72,7 @@ OUTPUT RULE (both modes) — the "code" value must always be raw Python source, 
 OUTPUT
 Return only raw JSON with no Markdown fences:
 - MODE A: {"code":"<inline script>"}
-- MODE B: {"code":"def run(arguments): ...","description":"<what the tool does>","parameters":{},"returns":{},"sample_arguments":{"<input_key>":"[{\"<flag>\": true, \"<value>\": 10}]"}}
+- MODE B: {"code":"def run(arguments): ...","description":"<what the tool does>","parameters":{"<input_key>":{"type":"string","description":"<describe the argument>"}},"returns":{"type":"object"},"sample_arguments":{"<input_key>":"[{\"<flag>\": true, \"<value>\": 10}]"}}
 
 CONTEXT EXAMPLES — plan JSON injected as {plan}:
   MODE A: {"action":"tool","tool_name":"code_execute","arguments":{"task":"filter products where price>100"}}

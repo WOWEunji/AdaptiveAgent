@@ -205,55 +205,6 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertEqual(propose_result.output["status"], "approval_required")
         self.assertFalse(propose_result.output["approved"])
 
-    def test_test_run_uses_workspace_copy(self) -> None:
-        result = self.run_tool(
-            "test_run",
-            {
-                "command": "python3 -c \"from pathlib import Path; Path('created.txt').write_text('x'); print('ok')\"",
-                "expected_stdout_contains": "ok",
-            },
-        )
-
-        self.assertTrue(result.success)
-        self.assertFalse((self.workspace / "created.txt").exists())
-        self.assertEqual(result.output["execution"]["sandbox"]["filesystem_isolation"], "workspace_copy")
-
-    def test_test_run_blocks_real_workspace_absolute_path(self) -> None:
-        result = self.run_tool(
-            "test_run",
-            {
-                "command": (
-                    "python3 -c \"from pathlib import Path; "
-                    f"Path({str(self.workspace / 'created.txt')!r}).write_text('x')\""
-                )
-            },
-        )
-
-        self.assertFalse(result.success)
-        self.assertTrue(result.output["verdict"]["policy_blocked"])
-        self.assertEqual(result.output["verdict"]["block_reason"], "workspace_path")
-        self.assertFalse((self.workspace / "created.txt").exists())
-
-    def test_test_run_skips_workspace_symlinks(self) -> None:
-        outside = Path(self.temp_dir.name).parent / "outside-adaptive-agent-test.txt"
-        outside.write_text("secret", encoding="utf-8")
-        try:
-            (self.workspace / "outside_link.txt").symlink_to(outside)
-            result = self.run_tool(
-                "test_run",
-                {
-                    "command": (
-                        "python3 -c \"from pathlib import Path; "
-                        "print(Path('outside_link.txt').exists())\""
-                    ),
-                    "expected_stdout_contains": "False",
-                },
-            )
-        finally:
-            outside.unlink(missing_ok=True)
-
-        self.assertTrue(result.success)
-
     def test_tool_create_keeps_generated_tool_out_of_manifest_until_approval(self) -> None:
         create_result = self.run_tool(
             "tool_create",
@@ -527,17 +478,68 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("name", result.error)
 
-    def test_web_fetch_rejects_non_http_scheme(self) -> None:
-        result = self.run_tool("web_fetch", {"url": "ftp://example.com/file"})
+    def _approve_tool(self, name: str, code: str) -> None:
+        self.run_tool("tool_create", {"name": name, "description": f"{name} 설명", "code": code})
+        self.run_tool("tool_validate", {"name": name})
+        self.run_tool("tool_approve", {"name": name})
+
+    def test_skill_list_returns_empty_when_no_skills(self) -> None:
+        result = self.run_tool("skill_list", {})
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output["skills"], [])
+        self.assertEqual(result.output["count"], 0)
+
+    def test_skill_list_returns_approved_skills(self) -> None:
+        self._approve_tool("list_skill_a", "def run(arguments):\n    return {'ok': True}\n")
+        self._approve_tool("list_skill_b", "def run(arguments):\n    return {'ok': True}\n")
+        # Re-create registry to pick up manifest entries
+        from adaptive_agent.tools.registry import create_default_registry
+        registry = create_default_registry(self.workspace)
+        tool = registry.get("skill_list")
+        result = tool.handler({})
+
+        self.assertTrue(result.success)
+        names = {s["name"] for s in result.output["skills"]}
+        self.assertIn("list_skill_a", names)
+        self.assertIn("list_skill_b", names)
+        self.assertEqual(result.output["count"], 2)
+
+    def test_skill_delete_removes_manifest_and_files(self) -> None:
+        self._approve_tool("del_target", "def run(arguments):\n    return {'ok': True}\n")
+        tool_dir = self.workspace / ".adaptive_agent" / "tools"
+
+        result = self.run_tool("skill_delete", {"name": "del_target"})
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output["deleted"], "del_target")
+        self.assertTrue(result.output["file_removed"])
+        self.assertFalse((tool_dir / "del_target.py").exists())
+        self.assertFalse((tool_dir / "del_target.json").exists())
+
+    def test_skill_delete_returns_false_for_missing_skill(self) -> None:
+        result = self.run_tool("skill_delete", {"name": "nonexistent_skill"})
 
         self.assertFalse(result.success)
-        self.assertIn("ftp", result.error)
+        self.assertIn("nonexistent_skill", result.error)
 
-    def test_web_fetch_rejects_empty_url(self) -> None:
-        result = self.run_tool("web_fetch", {"url": ""})
+    def test_skill_delete_requires_name(self) -> None:
+        result = self.run_tool("skill_delete", {"name": ""})
 
         self.assertFalse(result.success)
-        self.assertIn("url", result.error)
+        self.assertIn("name", result.error)
+
+    def test_skill_delete_unregisters_from_registry(self) -> None:
+        self._approve_tool("unreg_tool", "def run(arguments):\n    return {'ok': True}\n")
+        # Load a fresh registry so the approved tool is registered
+        from adaptive_agent.tools.registry import create_default_registry
+        registry = create_default_registry(self.workspace)
+        self.assertIsNotNone(registry.get("unreg_tool"))
+
+        skill_delete_tool = registry.get("skill_delete")
+        skill_delete_tool.handler({"name": "unreg_tool"})
+
+        self.assertIsNone(registry.get("unreg_tool"))
 
 
 if __name__ == "__main__":

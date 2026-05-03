@@ -22,3 +22,29 @@ coverage.xml
 .pytest_cache
 .hypothesis
 .adaptive_agent/
+
+# Build artifacts
+*.egg-info/
+
+# IDE / AI tool configs
+.claude/
+.cursor/
+.vscode/
+
+# Local scripts
+scripts/ollama_serve.sh
+
+# Project-internal docs & scratch files
+docs/architecture_blueprint.md
+docs/architecture_decision_log.md
+docs/basic_architecture_design.md
+docs/requirements_breakdown.md
+docs/adaptive_agent_validation_scenarios.md
+docs/prompt_tuning_decisions.md
+docs/research/
+docs/aavs_reports/
+reference.md
+llm_test.py
+requirements.txt
+CLAUDE.md
+adaptive_agent/CLAUDE.md

@@ -33,6 +33,7 @@ class CriticAgent(BaseRoleAgent):
             "execution_critiqued",
             agent_role=self.role,
             verdict=normalized_verdict,
+            reason=str(verdict.get("reason") or ""),
             next_node=next_node,
             has_reflection=bool(reflection),
         )

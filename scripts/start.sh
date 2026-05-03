@@ -4,7 +4,6 @@
 #   ./scripts/start.sh                     # 대화형 CLI 실행
 #   ./scripts/start.sh --check-only        # 환경 점검만 수행
 #   ./scripts/start.sh --provider openai   # OpenAI provider로 실행
-#   ./scripts/start.sh --provider gemini   # Gemini provider로 실행
 #   ./scripts/start.sh --provider ollama   # Ollama provider로 실행
 #   ./scripts/start.sh "작업 내용"          # 단일 작업 실행 후 종료
 
@@ -93,13 +92,11 @@ fi
 if [[ -z "$PROVIDER" ]]; then
     if [[ -n "${OPENAI_API_KEY:-}" && "$OPENAI_API_KEY" != *placeholder* && "$OPENAI_API_KEY" != *your_* ]]; then
         PROVIDER="openai"
-    elif [[ -n "${GEMINI_API_KEY:-}" && "$GEMINI_API_KEY" != *placeholder* && "$GEMINI_API_KEY" != *your_* ]]; then
-        PROVIDER="gemini"
     elif command -v ollama &>/dev/null; then
         PROVIDER="ollama"
     else
         warn "사용 가능한 LLM provider를 찾지 못했습니다."
-        warn "OPENAI_API_KEY, GEMINI_API_KEY 또는 Ollama 중 하나를 설정하세요."
+        warn "OPENAI_API_KEY, Ollama 중 하나를 설정하세요."
         PROVIDER="ollama"
     fi
 fi

@@ -7,8 +7,6 @@ import difflib
 import hashlib
 import json
 import re
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -131,9 +129,15 @@ def file_list(arguments: dict[str, object], *, workspace: Path) -> ToolExecution
     pattern = str(arguments.get("pattern") or "*")
     recursive = _coerce_bool(arguments.get("recursive"), default=False)
     max_entries = _coerce_int(arguments.get("max_entries"), default=200, minimum=1, maximum=1000)
-    resolved = _resolve_workspace_path(workspace, raw_path)
-    if isinstance(resolved, ToolExecutionResult):
-        return resolved
+    workspace_resolved = workspace.resolve()
+    candidate = (workspace_resolved / raw_path).resolve()
+    if candidate != workspace_resolved and workspace_resolved not in candidate.parents:
+        return ToolExecutionResult(
+            success=False,
+            output="",
+            error=f"workspace 밖 경로는 접근할 수 없습니다: {raw_path}. workspace: {workspace_resolved}",
+        )
+    resolved = candidate
     if not resolved.exists():
         return ToolExecutionResult(success=False, output="", error=f"경로를 찾을 수 없습니다: {raw_path}")
 
@@ -251,17 +255,6 @@ def propose_actions(arguments: dict[str, object]) -> ToolExecutionResult:
         },
     )
 
-
-def test_run(arguments: dict[str, object], *, sandbox: LocalSandboxBackend) -> ToolExecutionResult:
-    """Run a project test command in an isolated workspace copy."""
-
-    command = str(arguments.get("command") or "python3 -m unittest discover")
-    timeout_seconds = _coerce_timeout(arguments.get("timeout_seconds"), default=60.0, maximum=300.0)
-    try:
-        output = sandbox.run_workspace_command(command, timeout_seconds=timeout_seconds)
-    except SandboxPolicyViolation as exc:
-        return _policy_violation_result(exc)
-    return _result_from_process(output, arguments)
 
 
 def _check_code_semantics(code: str) -> str | None:
@@ -623,61 +616,72 @@ def artifact_store(arguments: dict[str, object], *, artifact_dir: Path) -> ToolE
     )
 
 
-_MAX_WEB_FETCH_BYTES = 1 * 1024 * 1024  # 1 MB
-_ALLOWED_SCHEMES = {"http", "https"}
+
+def skill_list(
+    _arguments: dict[str, object],
+    *,
+    tool_library: Path,
+) -> ToolExecutionResult:
+    """Return metadata summary for all skills in the manifest catalog."""
+
+    entries = SkillCatalog(tool_library).list()
+    if not entries:
+        return ToolExecutionResult(success=True, output={"skills": [], "count": 0})
+    skills = [
+        {
+            "name": e.get("name"),
+            "description": str(e.get("description") or "")[:80],
+            "usage_count": e.get("usage_count", 0),
+            "validation_status": e.get("validation_status"),
+        }
+        for e in entries
+    ]
+    return ToolExecutionResult(success=True, output={"skills": skills, "count": len(skills)})
 
 
-def web_fetch(arguments: dict[str, object]) -> ToolExecutionResult:
-    """Fetch a URL and return the HTTP status code and response body.
+def skill_delete(
+    arguments: dict[str, object],
+    *,
+    tool_library: Path,
+    registry,
+) -> ToolExecutionResult:
+    """Delete a skill from the manifest catalog and remove its source files.
 
-    Only ``http`` and ``https`` schemes are allowed. The response body is
-    truncated at 1 MB to prevent unbounded memory use.
-
-    Args:
-        arguments: ``url`` (str); ``method`` (str, default ``GET``);
-            ``timeout`` (int | float, default 10 seconds).
+    Removes the .py/.json files first, then the manifest entry, then unregisters
+    the tool from the in-memory registry. File deletion is attempted before the
+    manifest is touched so that failures leave the manifest intact and stale
+    entries can be discovered and retried via find_stale_entries.
     """
 
-    url = str(arguments.get("url") or "").strip()
-    method = str(arguments.get("method") or "GET").strip().upper()
-    try:
-        timeout = float(arguments.get("timeout") or 10)
-    except (TypeError, ValueError):
-        timeout = 10.0
+    name = str(arguments.get("name") or "").strip()
+    if not name:
+        return ToolExecutionResult(success=False, output={}, error="name이 필요합니다.")
 
-    if not url:
-        return ToolExecutionResult(success=False, output={}, error="url 인자가 필요합니다.")
-
-    # Scheme check before making any network connection
-    scheme = url.split("://")[0].lower() if "://" in url else ""
-    if scheme not in _ALLOWED_SCHEMES:
+    if not _SAFE_NAME_PATTERN.match(name):
         return ToolExecutionResult(
-            success=False,
-            output={},
-            error=f"허용되지 않는 URL scheme입니다 (http/https만 허용): {scheme!r}",
+            success=False, output={},
+            error="name은 영문·숫자·밑줄로만 구성된 2~64자 문자열이어야 합니다."
         )
 
     try:
-        req = urllib.request.Request(url, method=method)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — scheme already checked
-            status_code: int = resp.status
-            raw = resp.read(_MAX_WEB_FETCH_BYTES)
-        encoding = "utf-8"
-        body = raw.decode(encoding, errors="replace")
+        file_removed = False
+        for ext in (".py", ".json"):
+            p = tool_library / f"{name}{ext}"
+            if p.exists():
+                p.unlink()
+                file_removed = True
+
+        removed = SkillCatalog(tool_library).delete(name)
+        if not removed:
+            return ToolExecutionResult(success=False, output={}, error=f"스킬 '{name}'을(를) 찾을 수 없습니다.")
+
+        registry_unloaded = registry.unregister(name)
         return ToolExecutionResult(
             success=True,
-            output={"status_code": status_code, "body": body, "truncated": len(raw) >= _MAX_WEB_FETCH_BYTES},
+            output={"deleted": name, "file_removed": file_removed, "registry_unloaded": registry_unloaded},
         )
-    except urllib.error.HTTPError as exc:
-        return ToolExecutionResult(
-            success=False,
-            output={"status_code": exc.code},
-            error=f"HTTP {exc.code}: {exc.reason}",
-        )
-    except urllib.error.URLError as exc:
-        return ToolExecutionResult(success=False, output={}, error=f"URL 오류: {exc.reason}")
-    except TimeoutError:
-        return ToolExecutionResult(success=False, output={}, error=f"요청 시간 초과 ({timeout}초)")
+    except Exception as exc:
+        return ToolExecutionResult(success=False, output={}, error=f"삭제 중 오류 발생: {exc}")
 
 
 def suggested_builtin_tools(_arguments: dict[str, object]) -> ToolExecutionResult:
