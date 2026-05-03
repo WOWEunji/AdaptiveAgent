@@ -180,3 +180,97 @@ AAVS(AdaptiveAgent Validation Scenarios)를 OpenAI·Gemini·Ollama에서 실제 
 - `use_tool`, `create_tool`, `approve_tool`, `final_answer` 계약의 provider별 안정성 확인
 - `manifest.json` metadata schema와 migration 정책
 - AAVS-004, AAVS-005 기반 저장 승인/재사용 검증
+
+---
+
+## 2026-05-03 회고 — AAVS 검증 사이클 완료
+
+### 달성된 것
+
+**AAVS 16개 시나리오 기준 최종 결과:**
+
+| 모델 | 수정 전 | 수정 후 | 개선 |
+|------|:------:|:------:|:---:|
+| gpt-5.4-nano | 10/16 | 15/16 | +5 |
+| gpt-5.4-mini | 10/16 | 15/16 | +5 |
+| qwen3.5:2b | 8/16 | 9/16 | +1 |
+| qwen3.5:4b | 8/16 | 9/16 | +1 |
+| qwen3.5:9b | (신규) | 9/16 | — |
+
+OpenAI 모델 기준 5개 시나리오 개선: Critic 과잉 retry, `tool_validate` sample 없이 실패, JSON 파서 rfind 오작동, plan JSON 잘림, tool_approve 검증 기준. 이 버그들은 OpenAI에서 발현 빈도가 낮았을 뿐 qwen 스트레스 테스트로 근본 결함을 드러냈다.
+
+**주요 수정 항목:**
+- `agent.py` — Critic `success=True` 시 무조건 retry 차단, `_extract_json_object` balanced-bracket 교체, `_repair_truncated_json` dynamic suffix
+- `coder.py` — `_unwrap_double_encoded_code`: qwen 이중인코딩 복원 (trailing `)"`, `"}` 누락, regex `"\)(}+)$` 패턴)
+- `builtins.py` — `tool_validate` sample 없을 때 구조 검증만, `tool_approve` `validated=True` 기준으로 완화
+- `config.py` — `max_router_steps` 8 → 12
+
+### qwen 잔존 실패 원인 정리
+
+AAVS 7개 실패 전부 Coder 단계에서 발생. 플래너는 올바르게 동작함.
+
+| 실패 유형 | 대표 시나리오 | 근본 원인 |
+|---------|------------|---------|
+| 템플릿 과적합 | 007, 011, 013 | coder.txt "filter → aggregate" 예시를 모든 집계 태스크에 적용. 모델이 클수록 더 충실히 잘못 따름 |
+| 사전학습 편향 | 009, 010 | "CSV = 파일 열기", "손상 JSON = 자동 수정" 편향이 프롬프트 지시보다 강함. 크기 무관 |
+| MODE B 이중인코딩 | 014, 015 | qwen3.5 계열 전체에서 tool_create 출력이 `{"code":"def run..."}` 구조로 중첩. 9b도 동일 |
+
+AAVS-013 비교가 특히 명확: nano는 `r['product']['name']`, `sum(o['quantity'] for o in r['orders'])` 중첩 순회 1회 성공. qwen3.5:9b는 `filtered = [r for r in records if r['product']['price'] > 10]` 후 평균 계산으로 대치.
+
+### 발견: 모델 크기 증가로 해결되지 않는 이유
+
+- 템플릿 과적합: 더 큰 모델이 coder.txt 예시를 더 정확히 따름 → 잘못된 템플릿도 더 충실히 적용
+- 사전학습 편향: 파인튜닝 데이터의 강한 코딩 패턴(file I/O, auto-repair)이 instruction보다 우선
+- qwen3.5 계열 구조적 한계: 2b/4b/9b 모두 동일한 이중인코딩 패턴 → 아키텍처 레벨 문제
+
+### 시간이 있다면 — 우선순위 순
+
+**1. 코더 역할에 모델을 선택적으로 분리**
+
+현재 모든 역할(플래너, 코더, 크리틱)이 동일 모델을 사용. 하지만 데이터로 확인된 사실:
+- qwen3.5 플래너: 대부분 정상 동작 (`code_execute` / `tool_create` 선택 정확)
+- qwen3.5 코더: 핵심 병목
+
+`_code_with_llm`에 별도 LLM 클라이언트를 주입하는 방식으로 구현 가능. `config.py`에 `coder_llm_provider` / `coder_model` 추가 수준.
+
+```
+config 예시:
+  llm_provider = "ollama"        ← 플래너, 크리틱
+  coder_provider = "ollama"
+  coder_model = "qwen2.5-coder:7b"  ← 코더만 코딩 특화 모델
+```
+
+**2. 코딩 특화 모델 교체 테스트**
+
+qwen3.5는 general instruction-following 모델. 코드 생성 특화 모델 후보:
+- `qwen2.5-coder:7b` — 동급 크기, 코딩 파인튜닝
+- `deepseek-coder-v2:16b` — 코드 생성 벤치마크 상위권
+- `codellama:13b` — Meta 코딩 특화, instruction-following 안정
+
+특히 AAVS-013(중첩 JSON 순회), AAVS-010(inline 임베딩) 같은 케이스가 직접적 검증 대상.
+
+**3. Critic에 출력 합리성 검사 추가**
+
+현재 Critic은 "실행 성공 + JSON 출력 있으면 success". AAVS-007/011/013 모두 틀린 값을 success로 통과시킴. task 원문과 실행 결과를 같이 주고 수치/구조 합리성을 확인하는 critic.txt 규칙 추가 검토.
+
+**4. correction이 동일 실수를 반복하는 루프 방지**
+
+AAVS-010: `open()` 사용 오류가 self-correction 4회 전부 반복. 이전 시도의 실패 패턴을 `state.reflections`에 축적하는 방식은 있지만 correction이 이를 충분히 활용하지 못함. correction 프롬프트에 "이전 시도에서 이미 시도한 방법은 반복하지 않는다" 명시 또는 `forbidden_patterns` 메커니즘 검토.
+
+**5. 모델 패밀리별 프롬프트 분기**
+
+```
+prompts/
+  default/coder.txt        ← fallback
+  openai/coder.txt         ← 현재와 동일, 상세 예시
+  ollama-general/coder.txt ← qwen류: 예시 단순화, 제약 규칙 강조
+  ollama-coder/coder.txt   ← deepseek-coder류: 코드 예시 풍부
+```
+
+`PromptLoader`에 `{provider}/{model_family}` fallback 체인 추가. 현재 단일 프롬프트가 모든 모델에 적용되는 것이 qwen 성능의 주요 제약 중 하나.
+
+### 열린 질문 추가
+
+- `qwen2.5-coder:7b`를 코더 역할에 한정해 사용하면 qwen3.5 플래너 조합 대비 AAVS 점수가 실질적으로 개선되는가?
+- 역할별 모델 분리 시 context(state.reflections, last_tool_result 등)를 어떻게 효율적으로 전달할 것인가?
+- Critic의 수치 합리성 검사를 LLM에 맡기면 latency/비용이 어느 수준인가? rule-based fallback이 더 나은가?
